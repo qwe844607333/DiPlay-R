@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Legacy stock tethering (including ECARX Android 5.1) checks this permission. -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Legacy storage access for Android 4.4 - 8.1 crash/diagnostic exports on head units -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" tools:ignore="ScopedStorage" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <!-- Optional, user-authorized startup of the car's own hotspot. -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Optional: the dashboard map as a card over the home screen. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Optional, owner-enabled Usage Access for the verified DiLink 5.1 cluster profile. -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
+    <!-- The centre card also follows whichever launcher is the default home. -->
+    <queries>
+        <package android:name="com.byd.carsettings" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.HOME" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.OPEN_DOCUMENT" />
+            <data android:mimeType="*/*" />
+        </intent>
+    </queries>
+    <application>
+        <receiver android:name="com.shilapi.xcertplay.LegacyMediaKeyReceiver" android:exported="false">
+            <intent-filter><action android:name="android.intent.action.MEDIA_BUTTON" /></intent-filter>
+        </receiver>
+        <!-- Issue #151: GKUI/ECARX units swallow steering-wheel media keys in their own
+             mediacenter receiver before DiPlay's MediaSession sees them. This receiver runs
+             at maximum ordered-broadcast priority but stays disabled unless the runtime
+             detects an ECARX/GKUI unit (see CarPlayMediaKeys), so other cars are unaffected. -->
+        <receiver android:name="com.shilapi.xcertplay.WheelMediaKeyReceiver" android:exported="true" android:enabled="false">
+            <intent-filter android:priority="1000"><action android:name="android.intent.action.MEDIA_BUTTON" /></intent-filter>
+        </receiver>
+        <provider
+            android:name="com.shilapi.xcertplay.DiagnosticReportProvider"
+            android:authorities="${applicationId}.diagnostic-reports"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/diagnostic_report_paths" />
+        </provider>
+        <provider
+            android:name="com.shilapi.xcertplay.ApkUpdateProvider"
+            android:authorities="${applicationId}.apk-updates"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/apk_update_paths" />
+        </provider>
+        <activity android:name="com.shilapi.xcertplay.DiPlayActivity"
+            android:exported="true" android:launchMode="singleTop"
+            android:resizeableActivity="true"
+            android:configChanges="density|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+            android:theme="@style/Theme.Xcertplay">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <service android:name="com.shilapi.xcertplay.DiPlaySessionService"
+            android:exported="false" android:foregroundServiceType="connectedDevice|microphone|location" />
+
+        <!-- 蓝牙诊断：独立 :btprobe 进程跑 RFCOMM 探针，卡住可丢弃（port 自 xiaomiren/DiPlay） -->
+        <service android:name="com.shilapi.xcertplay.BluetoothProbeService"
+            android:process=":btprobe" android:exported="false" />
+        <activity android:name="com.shilapi.xcertplay.BluetoothDiagnosticActivity"
+            android:exported="false" android:theme="@style/Theme.Xcertplay" />
+
+        <activity
+            android:name="com.shilapi.xcertplay.CarPlayHostActivity"
+            android:taskAffinity="${applicationId}.carplay"
+            android:configChanges="density|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:resizeableActivity="true"
+            android:screenOrientation="fullSensor"
+            android:theme="@style/Theme.Xcertplay"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Issue #311: keep meta-data for UsbDeviceFilter inspections but avoid static intent-filter
+                 which triggers Android framework's intrusive 'Open with DiPlay?' system dialog and
+                 causes usbfs D-state race conditions on older kernels (e.g. Allwinner T3). -->
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/usb_device_filter" />
+        </activity>
+
+        <!-- Issue #321: Dedicated trampoline activity for external USB Bluetooth dongles (e.g. UGREEN CM591).
+             Provides the static intent-filter with usb_bt_device_filter.xml required for Android to persist
+             the "Use by default for this USB device" permission checkbox across reboots, isolated from Apple iPhones. -->
+        <activity
+            android:name="com.shilapi.xcertplay.usbbt.UsbBtDeviceAttachedActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/usb_bt_device_filter" />
+        </activity>
+
+        <activity
+            android:name="com.shilapi.xcertplay.AdbClusterActivity"
+            android:label="@string/adb_cluster_activity_label"
+            android:icon="@drawable/ic_dp_navigation"
+            android:taskAffinity="${applicationId}.cluster"
+            android:excludeFromRecents="true"
+            android:resizeableActivity="true"
+            android:allowEmbedded="true"
+            android:exported="true"
+            android:configChanges="density|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+            android:theme="@style/Theme.AdbCluster">
+        </activity>
+
+        <activity
+            android:name="com.shilapi.xcertplay.CarPlayVideoActivity"
+            android:configChanges="density|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+            android:exported="false"
+            android:theme="@style/Theme.Xcertplay" />
+
+        <activity
+            android:name="com.shilapi.xcertplay.MainActivity"
+            android:exported="false"
+            android:resizeableActivity="true"
+            android:theme="@style/Theme.Xcertplay" />
+
+        <activity
+            android:name="com.shilapi.xcertplay.ImageCropActivity"
+            android:exported="false"
+            android:resizeableActivity="true"
+            android:screenOrientation="fullSensor"
+            android:theme="@style/Theme.Xcertplay" />
+
+        <!-- CarPlay navigation widget, for launchers that host standard widgets. -->
+        <receiver
+            android:name="com.shilapi.xcertplay.NavigationWidget"
+            android:exported="false"
+            android:label="@string/navigation_widget_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/navigation_widget_info" />
+        </receiver>
+
+        <!-- The live dashboard map for launchers that embed it (docs/LAUNCHER_INTEGRATION.md). -->
+        <service
+            android:name="com.shilapi.xcertplay.MapEmbedService"
+            android:exported="true"
+            tools:ignore="ExportedService">
+            <intent-filter>
+                <action android:name="com.shihab.diplay.action.EMBED_MAP" />
+            </intent-filter>
+        </service>
+
+        <!-- Optional: steering-wheel keys for the dashboard map zoom (docs/BYD_NAVIGATION.md). -->
+        <service
+            android:name="com.shilapi.xcertplay.WheelKeyService"
+            android:exported="true"
+            android:label="@string/wheel_key_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/wheel_key_service" />
+        </service>
+
+        <receiver
+            android:name="com.shilapi.xcertplay.BootReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name="com.shilapi.xcertplay.UsbAutoConfirmService"
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/usb_auto_confirm_service_config" />
+        </service>
+    </application>
+
+</manifest>

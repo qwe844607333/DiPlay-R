@@ -1,0 +1,54 @@
+# Android Studio and local IDE state
+.idea/
+*.iml
+.vscode/
+
+# Gradle and local tooling
+.gradle/
+.kotlin/
+.android-sdk/
+build/
+local.properties
+
+# Native build output
+.cxx/
+.externalNativeBuild/
+captures/
+
+# Local agent working notes
+/agent_docs/
+/.review-issues/
+/dist/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.log
+/.idea
+
+# Local beta credentials and release signing (never commit)
+.private/
+auth-assets/
+*.jks
+*.keystore
+release-signing.properties
+
+# Never commit credential containers or installable distribution artifacts.
+*.pk8
+*.p7b
+*.p12
+*.pfx
+*.pem
+*.key
+*.apk
+*.aab
+
+# Pinned libopus dependency retrieved by scripts/prepare-libopus.py
+/shared/src/main/jni/libopus/
+
+# Pinned lwIP dependency retrieved by scripts/prepare-lwip.py
+/shared/src/main/jni/lwip/
+
+# Root-level release checksum sidecars (permanent records belong in checksums/)
+/*.apk.sha256
+

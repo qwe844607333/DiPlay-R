@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Apple USB devices (0x05AC): iPhone/iAP2 configurations can change product IDs. -->
+    <usb-device vendor-id="1452" />
+    <!-- CH341 USB\VID_1A86&PID_5512&REV_0304 -->
+    <usb-device vendor-id="6790" product-id="21778" />
+    <!-- Bluetooth USB Controllers: Class 224 (0xE0: Wireless Controller), Subclass 1 (RF), Protocol 1 (Bluetooth) -->
+    <usb-device class="224" subclass="1" protocol="1" />
+    <!-- Common Bluetooth Dongles: UGREEN/Actions (0x10d7=4311, 0x2b89=11145), Realtek (0x0bda=3034), CSR (0x0a12=2578) -->
+    <usb-device vendor-id="4311" />
+    <usb-device vendor-id="11145" />
+    <usb-device vendor-id="3034" />
+    <usb-device vendor-id="2578" />
+</resources>
