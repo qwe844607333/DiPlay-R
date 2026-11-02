@@ -1,4 +1,4 @@
-﻿import com.android.build.gradle.internal.tasks.L8DexDesugarLibTask
+import com.android.build.gradle.internal.tasks.L8DexDesugarLibTask
 import java.security.KeyStore
 import java.security.MessageDigest
 import org.gradle.api.DefaultTask
@@ -33,8 +33,8 @@ android {
         multiDexEnabled = true
         multiDexKeepProguard = file("multidex-config.pro")
         testInstrumentationRunner = "com.shilapi.xcertplay.T3LegacyInstrumentation"
-        versionCode = 130
-        versionName = "0.3.10"
+        versionCode = 133
+        versionName = "0.3.13"
 
     }
 
@@ -206,3 +206,4 @@ tasks.register("assembleStandaloneRelease") {
     description = "Build a signed standalone APK with explicitly provisioned authentication."
     dependsOn(verifyStandaloneAuthentication, verifyReleaseSigningIdentity, "assembleRelease")
 }
+

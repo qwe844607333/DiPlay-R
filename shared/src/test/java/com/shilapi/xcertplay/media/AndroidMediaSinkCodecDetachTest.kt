@@ -56,6 +56,9 @@ class AndroidMediaSinkCodecDetachTest {
     private class GateCodec : ShadowMediaCodec.CodecConfig.Codec {
         val configuredSurfaces = CopyOnWriteArrayList<Surface?>()
         val processed = AtomicInteger()
+        val configuredRates = CopyOnWriteArrayList<Int?>()
+        var rejectOperatingRate = false
+        var failNextInput = false
         @Volatile private var gate: CountDownLatch? = null
         @Volatile var entered = CountDownLatch(1)
             private set
@@ -72,6 +75,7 @@ class AndroidMediaSinkCodecDetachTest {
 
         override fun process(input: ByteBuffer, output: ByteBuffer) {
             processed.incrementAndGet()
+            if (failNextInput) { failNextInput = false; throw IllegalStateException("simulated decoder failure") }
             val held = gate ?: return
             entered.countDown()
             var interrupted = false
@@ -88,6 +92,11 @@ class AndroidMediaSinkCodecDetachTest {
         }
 
         override fun onConfigured(format: MediaFormat?, surface: Surface?, crypto: MediaCrypto?, flags: Int) {
+            val rate = if (format?.containsKey(MediaFormat.KEY_OPERATING_RATE) == true) {
+                format.getInteger(MediaFormat.KEY_OPERATING_RATE)
+            } else null
+            configuredRates += rate
+            if (rejectOperatingRate && rate != null) throw IllegalArgumentException("unsupported rate hint")
             configuredSurfaces += surface
         }
     }
@@ -135,6 +144,38 @@ class AndroidMediaSinkCodecDetachTest {
         assertSame("the codec now renders to the consumer", parking.surface, decoder.field<Surface?>("outputSurface"))
         assertSame("parking keeps the codec and its state", codecBefore, mediaCodecOf(decoder))
         assertEquals(listOf<Surface?>(a), codec.configuredSurfaces.toList())
+    }
+
+    @Test fun runtimeFailureDropsTheRateHintBeforeRecovery() {
+        val sink = configuredSink(newSurface(), rateHint = 60)
+        codec.failNextInput = true
+        sink.onVideoFrame(110, idr)
+        assertTrue(barrier(sink))
+        assertNull(mediaCodecOf(mainDecoder(sink)))
+        sink.onVideoFrame(110, idr)
+        assertTrue(barrier(sink))
+        assertEquals(listOf(60, null), codec.configuredRates.toList())
+        assertNotNull(mediaCodecOf(mainDecoder(sink)))
+        assertTrue(uncaught.toString(), uncaught.isEmpty())
+    }
+
+    @Test fun selectedFrameRateIsOfferedOnlyToTheMainDecoder() {
+        val sink = configuredSink(newSurface(), rateHint = 60)
+        sink.setSurface(111, newSurface())
+        sink.onVideoConfig(111, avcC)
+        sink.onVideoFrame(111, idr)
+        assertTrue(barrier(sink))
+        assertEquals(listOf(60, null), codec.configuredRates.toList())
+    }
+
+    @Test fun rejectedRateFallsBackAndIsNotRetriedOnEveryReconfigure() {
+        codec.rejectOperatingRate = true
+        val sink = configuredSink(newSurface(), rateHint = 60)
+        assertEquals(listOf(60, null), codec.configuredRates.toList())
+        sink.onVideoConfig(110, avcC + byteArrayOf(0))
+        assertTrue(barrier(sink))
+        assertEquals(listOf(60, null, null), codec.configuredRates.toList())
+        assertNotNull(mediaCodecOf(mainDecoder(sink)))
     }
 
     @Test fun rebindingTheSameSurfacePreservesQueuedPredictedFrames() {
@@ -190,6 +231,91 @@ class AndroidMediaSinkCodecDetachTest {
         sink.onVideoFrame(110, idr)
         assertTrue(barrier(sink))
         assertEquals(before + 1, codec.processed.get())
+    }
+
+    @Test fun delayedBurstKeepsItsValidPredictedFrames() {
+        val sink = configuredSink(newSurface())
+        holdWorkerInCodec(sink)
+        val decoder = mainDecoder(sink)
+        val queue = decoder.field<VideoDecodeQueue>("queue")
+        val before = codec.processed.get()
+        val received = System.nanoTime() - 900_000_000L
+        decoder.replaceField("lastOutputRenderedNs", System.nanoTime())
+        repeat(3) { queue.offer(VideoJob.Frame(predicted, receivedNs = received)) }
+        codec.release()
+        assertTrue(barrier(sink))
+        assertEquals("a delayed burst must keep its reference chain instead of dropping arbitrary P frames",
+            before + 3, codec.processed.get())
+    }
+
+    @Test fun anExcessiveBacklogRecoversBeforeDecodingDependentFrames() {
+        val sink = configuredSink(newSurface())
+        holdWorkerInCodec(sink)
+        val decoder = mainDecoder(sink)
+        val codecBefore = mediaCodecOf(decoder)
+        val queue = decoder.field<VideoDecodeQueue>("queue")
+        val before = codec.processed.get()
+        val now = System.nanoTime()
+        decoder.replaceField("lastOutputRenderedNs", now)
+        queue.offer(VideoJob.Frame(predicted, receivedNs = now - 1_700_000_000L))
+        queue.offer(VideoJob.Frame(predicted, receivedNs = now - 100_000_000L))
+        codec.release()
+        assertTrue(barrier(sink))
+        assertEquals("a fresh P frame cannot use a reference dropped from the backlog", before, codec.processed.get())
+        assertSame("backlog recovery keeps the working hardware codec", codecBefore, mediaCodecOf(decoder))
+        sink.onVideoFrame(110, idr)
+        assertTrue(barrier(sink))
+        assertEquals("a new IDR resumes the recovered stream", before + 1, codec.processed.get())
+    }
+
+    @Test fun softOverloadKeepsRenderingWhileAReplacementKeyframeIsRequested() {
+        val sink = configuredSink(newSurface())
+        holdWorkerInCodec(sink)
+        val decoder = mainDecoder(sink)
+        val queue = decoder.field<VideoDecodeQueue>("queue")
+        val recovery = decoder.field<VideoBacklogRecovery>("backlogRecovery")
+        val before = codec.processed.get()
+        val now = System.nanoTime()
+        recovery.observe(now - 800_000_000L, now - 1_200_000_000L, 1, now - 900_000_000L)
+        decoder.replaceField("lastOutputRenderedNs", now)
+        repeat(6) { i -> queue.offer(VideoJob.Frame(predicted, receivedNs = now - 600_000_000L + i * 90_000_000L)) }
+        codec.release()
+        assertTrue(barrier(sink))
+        assertEquals("soft overload must not destroy the valid chain before a new IDR is available", before + 6, codec.processed.get())
+    }
+
+    @Test fun anExcessiveBacklogUsesAnAlreadyQueuedIdrInsteadOfWaitingForAnother() {
+        val sink = configuredSink(newSurface())
+        holdWorkerInCodec(sink)
+        val decoder = mainDecoder(sink)
+        val queue = decoder.field<VideoDecodeQueue>("queue")
+        val before = codec.processed.get()
+        val now = System.nanoTime()
+        decoder.replaceField("lastOutputRenderedNs", now)
+        queue.offer(VideoJob.Frame(predicted, receivedNs = now - 1_700_000_000L))
+        queue.offer(VideoJob.Frame(idr, receivedNs = now - 100_000_000L))
+        queue.offer(VideoJob.Frame(predicted, receivedNs = now - 50_000_000L))
+        codec.release()
+        assertTrue(barrier(sink))
+        assertEquals("the queued IDR and its dependent picture can immediately restart the chain", before + 2, codec.processed.get())
+    }
+
+    @Test fun catchUpMustNotTakeAnIdrOwnedByALaterConfiguration() {
+        val sink = configuredSink(newSurface())
+        holdWorkerInCodec(sink)
+        val decoder = mainDecoder(sink)
+        val queue = decoder.field<VideoDecodeQueue>("queue")
+        val before = codec.processed.get()
+        val now = System.nanoTime()
+        decoder.replaceField("lastOutputRenderedNs", now)
+        queue.offer(VideoJob.Frame(predicted, receivedNs = now - 1_700_000_000L))
+        queue.offer(VideoJob.Frame(predicted, receivedNs = now - 100_000_000L))
+        queue.offer(VideoJob.Config(com.shilapi.xcertplay.airplay.VideoCodec.H264, avcC))
+        queue.offer(VideoJob.Frame(idr, receivedNs = now - 50_000_000L))
+        queue.offer(VideoJob.Frame(predicted, receivedNs = now))
+        codec.release()
+        assertTrue(barrier(sink))
+        assertEquals(before + 2, codec.processed.get())
     }
 
     @Test fun theParkingConsumerDrainsWhileTheMainThreadIsBlocked() {
@@ -506,8 +632,8 @@ class AndroidMediaSinkCodecDetachTest {
     }
 
     /** A smooth-video sink, as the host makes it: no default surface, the main stream configured on [surface]. */
-    private fun configuredSink(surface: Surface): AndroidMediaSink {
-        val sink = AndroidMediaSink(surface = null, videoPacingDelayMillis = 90)
+    private fun configuredSink(surface: Surface, rateHint: Int = 0): AndroidMediaSink {
+        val sink = AndroidMediaSink(surface = null, videoPacingDelayMillis = 90, mainVideoFrameRate = rateHint)
         sinks += sink
         sink.setSurface(110, surface)
         sink.onVideoConfig(110, avcC)

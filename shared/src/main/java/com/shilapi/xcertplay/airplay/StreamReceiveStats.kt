@@ -26,10 +26,22 @@ internal class StreamReceiveStats(
     private var lastSequenceGap = "none"
     private var lastSequenceGapAtMs = -1L
     private var lateOrDuplicate = 0
+    private val decryptLock = Any()
     private var decryptSamples = 0
+    private var decryptQueueSumNs = 0L
+    private var maxDecryptQueueNs = 0L
+    private var sequenceProvided = false
+    private var videoTimingSeen = false
+    private var lastSenderNs = 0L
+    private var lastVideoArrivalNs = 0L
+    private var senderSamples = 0
+    private var senderSumNs = 0L
+    private var senderMaxNs = 0L
+    private var videoArrivalMaxNs = 0L
     private var decryptBytes = 0L
     private var decryptSumNs = 0L
     private var maxDecryptNs = 0L
+    private var maxDecryptSampleBytes = 0
 
     fun reading() { readStart = nowNs() }
 
@@ -45,6 +57,7 @@ internal class StreamReceiveStats(
         packets++
         bytes += size
         if (sequence != null) {
+            sequenceProvided = true
             val expected = nextSequence
             val delta = if (expected == null) 0 else (sequence - expected) and 0xffff
             if (delta < 0x8000) {
@@ -67,12 +80,33 @@ internal class StreamReceiveStats(
         if (timestamp != null) lastTimestamp = timestamp
     }
 
+    /** Phone-provided frame times compared with receive completion, before the decrypt queue. */
+    fun videoFrameTiming(senderNs: Long, arrivalNs: Long) {
+        videoTimingSeen = true
+        val senderGap = senderNs - lastSenderNs
+        val arrivalGap = arrivalNs - lastVideoArrivalNs
+        // Ignore missing/discontinuous sender clocks and long idle gaps.
+        if (senderNs > 0 && lastSenderNs > 0 && senderGap in 1..5_000_000_000L && arrivalGap >= 0) {
+            senderSamples++
+            senderSumNs += senderGap
+            senderMaxNs = maxOf(senderMaxNs, senderGap)
+            videoArrivalMaxNs = maxOf(videoArrivalMaxNs, arrivalGap)
+        }
+        lastSenderNs = senderNs
+        lastVideoArrivalNs = arrivalNs
+    }
+
     /** One payload opened in [durationNs]; reported only for streams that call it. */
-    fun decrypted(durationNs: Long, size: Int) {
+    fun decrypted(durationNs: Long, size: Int, queueWaitNs: Long = 0L) = synchronized(decryptLock) {
         decryptSamples++
+        decryptQueueSumNs += queueWaitNs.coerceAtLeast(0L)
+        maxDecryptQueueNs = maxOf(maxDecryptQueueNs, queueWaitNs)
         decryptBytes += size
         decryptSumNs += durationNs
-        maxDecryptNs = maxOf(maxDecryptNs, durationNs)
+        if (decryptSamples == 1 || durationNs > maxDecryptNs) {
+            maxDecryptNs = durationNs
+            maxDecryptSampleBytes = size
+        }
     }
 
     fun processed() {
@@ -83,6 +117,11 @@ internal class StreamReceiveStats(
     fun flush(ended: Boolean = false) {
         val now = nowNs()
         if (!ended && now - windowStart < 5_000_000_000L) return
+        val decrypt = takeDecryptSummary()
+        val sender = if (!videoTimingSeen) "" else if (senderSamples == 0) " senderSamples=0" else
+            " senderSamples=$senderSamples senderAvgUs=${senderSumNs / senderSamples / 1000} " +
+                "senderMaxGapMs=${senderMaxNs / 1_000_000} frameArrivalMaxGapMs=${videoArrivalMaxNs / 1_000_000}"
+        senderSamples = 0; senderSumNs = 0L; senderMaxNs = 0L; videoArrivalMaxNs = 0L
         runCatching { report("Receive: $label packets=$packets bytes=$bytes readMaxMs=${maxReadNs / 1_000_000} " +
             "processMaxUs=${maxProcessNs / 1000} seqForwardGaps=$forwardGapPackets " +
             "lateOrDuplicate=$lateOrDuplicate interArrivalMaxMs=${maxInterArrivalNs / 1_000_000} " +
@@ -90,12 +129,9 @@ internal class StreamReceiveStats(
             "seqGapLast=[$lastSequenceGap] seqGapAtMs=$lastSequenceGapAtMs ended=$ended " +
             "windowMs=${(now - windowStart).coerceAtLeast(0) / 1_000_000} " +
             "readsOver250Ms=$readsOver250Ms seqGapAfterReadOver250Ms=$seqGapAfterReadOver250Ms " +
-            "seqMissingAfterReadOver250Ms=$seqMissingAfterReadOver250Ms" + decryptSummary()) }
+            "seqMissingAfterReadOver250Ms=$seqMissingAfterReadOver250Ms " +
+            "sequenceTracking=${if (sequenceProvided) "provided" else "not_provided"}" + sender + decrypt) }
         windowStart = now
-        decryptSamples = 0
-        decryptBytes = 0
-        decryptSumNs = 0
-        maxDecryptNs = 0
         packets = 0
         bytes = 0
         maxReadNs = 0
@@ -114,13 +150,23 @@ internal class StreamReceiveStats(
 
     private fun Int.toUnsignedLong(): Long = toLong() and 0xffff_ffffL
 
-    private fun decryptSummary(): String {
-        if (decryptSamples == 0) return ""
+    private fun takeDecryptSummary(): String = synchronized(decryptLock) {
+        if (decryptSamples == 0) return@synchronized ""
         // Two decimals, or a slow stream (under 1 MB/s, as on the legacy NTDA3 head unit) prints 0.
         val hundredths = if (decryptSumNs == 0L) 0L else
             (decryptBytes * 100_000L + decryptSumNs / 2) / decryptSumNs
-        return " decryptAvgUs=${decryptSumNs / decryptSamples / 1000} decryptMaxUs=${maxDecryptNs / 1000} " +
+        val summary = " decryptSamples=$decryptSamples decryptQueueAvgUs=${decryptQueueSumNs / decryptSamples / 1000} " +
+            "decryptQueueMaxUs=${maxDecryptQueueNs / 1000} decryptMaxSampleBytes=$maxDecryptSampleBytes" +
+            " decryptAvgUs=${decryptSumNs / decryptSamples / 1000} decryptMaxUs=${maxDecryptNs / 1000} " +
             "decryptMBps=${hundredths / 100}.${(hundredths % 100).toString().padStart(2, '0')}"
+        decryptSamples = 0
+        decryptQueueSumNs = 0L
+        maxDecryptQueueNs = 0L
+        decryptBytes = 0
+        decryptSumNs = 0
+        maxDecryptNs = 0
+        maxDecryptSampleBytes = 0
+        summary
     }
 
     private companion object { const val LONG_READ_NS = 250_000_000L }

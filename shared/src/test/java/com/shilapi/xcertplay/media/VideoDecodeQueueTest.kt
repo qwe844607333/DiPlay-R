@@ -64,6 +64,70 @@ class VideoDecodeQueueTest {
         assertEquals(5, (queue.poll(0) as VideoJob.Frame).nalus.size)
         assertNull(queue.poll(0))
     }
+    @Test fun backlogSnapshotStopsAtTheNextControlJob() {
+        val queue = VideoDecodeQueue()
+        queue.offer(VideoJob.Frame(byteArrayOf(1), receivedNs = 100))
+        queue.offer(VideoJob.Frame(byteArrayOf(2), receivedNs = 150))
+        queue.offer(VideoJob.RefreshPicture)
+        queue.offer(VideoJob.Frame(byteArrayOf(3), receivedNs = 500))
+        queue.poll(0)
+        assertEquals(VideoDecodeQueue.Backlog(1, 150), queue.backlogAfterCurrent())
+    }
+
+    @Test fun discardingCurrentChainPreservesFutureConfigAndItsFrameBudget() {
+        val queue = VideoDecodeQueue(maxFrames = 3, maxBytes = 6)
+        val config = VideoJob.Config(VideoCodec.H264, byteArrayOf(1))
+        queue.offer(VideoJob.Frame(ByteArray(3)))
+        queue.offer(VideoJob.Resync)
+        queue.offer(config)
+        queue.offer(VideoJob.Frame(ByteArray(2)))
+        queue.discardCurrentChain()
+        queue.offer(VideoJob.Frame(ByteArray(4)))
+        assertSame(config, queue.poll(0))
+        assertEquals(2, (queue.poll(0) as VideoJob.Frame).nalus.size)
+        assertEquals(4, (queue.poll(0) as VideoJob.Frame).nalus.size)
+        assertNull(queue.poll(0))
+    }
+
+    @Test fun overflowRacingAConsumerCannotEraseTheNewFrameBudget() {
+        val queue = VideoDecodeQueue(maxFrames = 2, maxBytes = 100)
+        // Gate the queue's accounting lock. The old poll removed a frame before taking this lock.
+        val lock = checkNotNull(runCatching { queue.javaClass.getDeclaredField("lock").apply {
+            isAccessible = true
+        }.get(queue) }.getOrDefault(queue))
+        val consumer = Thread { queue.poll(200) }
+        try {
+            synchronized(lock) {
+                queue.offer(VideoJob.Frame(byteArrayOf(1)))
+                queue.offer(VideoJob.Frame(byteArrayOf(2)))
+                consumer.start()
+                val deadline = System.nanoTime() + 1_000_000_000L
+                while (consumer.state != Thread.State.BLOCKED && System.nanoTime() < deadline) Thread.yield()
+                assertEquals("consumer reached the queue lock", Thread.State.BLOCKED, consumer.state)
+                queue.offer(VideoJob.Frame(byteArrayOf(3)))
+                queue.offer(VideoJob.Frame(byteArrayOf(4)))
+            }
+            consumer.join(1000)
+            assertFalse(consumer.isAlive)
+            queue.offer(VideoJob.Frame(byteArrayOf(5)))
+            assertTrue("new frame budget survives the earlier consumer", queue.drain().filterIsInstance<VideoJob.Frame>().size <= 2)
+        } finally { consumer.interrupt(); consumer.join(1000) }
+    }
+
+    @Test fun interruptedTimedPollDoesNotConsumeQueuedWork() {
+        val queue = VideoDecodeQueue()
+        queue.offer(VideoJob.Frame(byteArrayOf(7)))
+        val interrupted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val worker = Thread {
+            Thread.currentThread().interrupt()
+            try { queue.poll(5) } catch (_: InterruptedException) { interrupted.set(true) }
+        }
+        worker.start(); worker.join(1000)
+        assertFalse(worker.isAlive)
+        assertTrue(interrupted.get())
+        assertEquals(7.toByte(), (queue.poll(0) as VideoJob.Frame).nalus[0])
+    }
+
     @Test fun waitingDecoderNeverBlocksFrameProducer() {
         val queue = VideoDecodeQueue()
         val waiting = java.util.concurrent.CountDownLatch(1)

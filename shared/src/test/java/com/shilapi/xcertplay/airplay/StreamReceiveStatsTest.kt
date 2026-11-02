@@ -82,6 +82,23 @@ class StreamReceiveStatsTest {
         assertTrue(!output.last().contains("decrypt"))
     }
 
+    @Test fun decryptWorkArrivingDuringAReportBelongsToTheNextWindow() {
+        var clock = 0L
+        val output = mutableListOf<String>()
+        lateinit var stats: StreamReceiveStats
+        stats = StreamReceiveStats("video", { line ->
+            output.add(line)
+            if (output.size == 1) stats.decrypted(2_000_000L, 1_000)
+        }) { clock }
+        stats.decrypted(1_000_000L, 1_000)
+        clock = 5_000_000_000L
+        stats.flush()
+        clock = 10_000_000_000L
+        stats.flush()
+        assertTrue("concurrent decrypt work must not be reset after the report callback",
+            output.last().contains("decryptAvgUs=2000"))
+    }
+
     @Test fun decryptThroughputBelowOneMBpsIsNotTruncatedToZero() {
         var clock = 0L
         val output = mutableListOf<String>()
@@ -93,4 +110,46 @@ class StreamReceiveStatsTest {
         stats.flush()
         assertTrue(output.last().endsWith(" decryptAvgUs=2000 decryptMaxUs=2000 decryptMBps=0.25"))
     }
+    @Test fun senderCadenceIsSeparatedFromBurstArrivalAndMissingSequenceData() {
+        val output = mutableListOf<String>()
+        val stats = StreamReceiveStats("video", output::add)
+        stats.videoFrameTiming(1_000_000_000L, 1_000_000_000L)
+        stats.videoFrameTiming(1_016_000_000L, 1_316_000_000L)
+        stats.videoFrameTiming(1_032_000_000L, 1_317_000_000L)
+        stats.flush(true)
+        val line = output.single()
+        assertTrue(line.contains("sequenceTracking=not_provided"))
+        assertTrue(line.contains("senderSamples=2 senderAvgUs=16000 senderMaxGapMs=16 frameArrivalMaxGapMs=316"))
+    }
+
+    @Test fun decryptQueueWaitIsNotReportedAsCryptographicExecutionTime() {
+        val output = mutableListOf<String>()
+        val stats = StreamReceiveStats("video", output::add)
+        stats.decrypted(1_000_000, 1000, 20_000_000)
+        stats.flush(true)
+        assertTrue(output.single().contains("decryptQueueAvgUs=20000 decryptQueueMaxUs=20000"))
+        assertTrue(output.single().contains("decryptAvgUs=1000"))
+    }
+
+    @Test fun missingAndBackwardSenderClocksDoNotProduceFakeCadence() {
+        val output = mutableListOf<String>()
+        val stats = StreamReceiveStats("video", output::add)
+        stats.videoFrameTiming(0, 100)
+        stats.videoFrameTiming(1000, 200)
+        stats.videoFrameTiming(900, 300)
+        stats.flush(true)
+        assertTrue(output.single().contains("senderSamples=0"))
+        assertFalse(output.single().contains("senderAvgUs="))
+    }
+
+    @Test fun slowestDecryptSampleKeepsItsOwnPayloadSize() {
+        val output = mutableListOf<String>()
+        val stats = StreamReceiveStats("video", output::add)
+        stats.decrypted(1_000_000, 500_000)
+        stats.decrypted(10_000_000, 1_000)
+        stats.flush(true)
+        assertTrue(output.single().contains("decryptMaxSampleBytes=1000"))
+        assertTrue(output.single().contains("decryptMaxUs=10000"))
+    }
+
 }

@@ -1,20 +1,30 @@
 package com.shilapi.xcertplay.media
 
-/** Diagnostic link between the touch uplink and the next video frame, read by [VideoStats]. */
+/** Diagnostic touch-to-receive proxy; it does not measure physical presentation. */
 internal object TouchLatencyProbe {
-    @Volatile private var pendingTouchNs = 0L
-    @Volatile var maxSendNs = 0L
+    private var pendingTouchNs = 0L
+    private var maxSendNs = 0L
+    private var maxQueueNs = 0L
 
-    fun onTouchSent(sentAtNs: Long, sendDurationNs: Long) {
+    data class SendTimes(val maxSendNs: Long = 0L, val maxQueueNs: Long = 0L)
+
+    @Synchronized fun onTouchSent(sentAtNs: Long, sendDurationNs: Long, queueDelayNs: Long = 0L) {
         if (pendingTouchNs == 0L) pendingTouchNs = sentAtNs
-        if (sendDurationNs > maxSendNs) maxSendNs = sendDurationNs
+        maxSendNs = maxOf(maxSendNs, sendDurationNs)
+        maxQueueNs = maxOf(maxQueueNs, queueDelayNs)
     }
 
-    /** Returns touch-to-frame latency for the first frame after a touch, or -1. */
-    fun onFrame(nowNs: Long): Long {
+    /** The receive timestamp may predate a touch recorded concurrently; leave that touch pending. */
+    @Synchronized fun onFrame(nowNs: Long): Long {
         val touch = pendingTouchNs
-        if (touch == 0L) return -1
+        if (touch == 0L || nowNs < touch) return -1L
         pendingTouchNs = 0L
         return nowNs - touch
+    }
+
+    /** Only main-screen stats drain this window; mirrors/cluster cannot steal its samples. */
+    @Synchronized fun takeSendTimes(): SendTimes = SendTimes(maxSendNs, maxQueueNs).also {
+        maxSendNs = 0L
+        maxQueueNs = 0L
     }
 }

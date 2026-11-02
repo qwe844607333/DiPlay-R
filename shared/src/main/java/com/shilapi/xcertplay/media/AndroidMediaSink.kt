@@ -346,6 +346,8 @@ class AndroidMediaSink(
      * decoded. Only a SurfaceView honours the timestamps, so the host sets it with one.
      */
     private val videoPacingDelayMillis: Int = 0,
+    /** Optional main-screen decoder resource hint; zero leaves the existing format unchanged. */
+    private val mainVideoFrameRate: Int = 0,
 ) : MediaSink {
     // Each downlink publishes its own reference; a mic must match that stream and sample rate.
     private val callEchoReferences = ConcurrentHashMap<AudioStreamId, EchoReference>()
@@ -907,6 +909,7 @@ class AndroidMediaSink(
         videoWidth,
         videoHeight,
         preferSoftwareHevcDecoder,
+        operatingRate = videoOperatingRate(type, statsLabel, mainVideoFrameRate, realSdkInt()),
         requestKeyFrame = { requestVideoRecovery(type) },
         report = { videoDiagnosticHandlers[type]?.invoke(it) },
         statsLabel = statsLabel,
@@ -1005,6 +1008,12 @@ internal class ParkingOutput(width: Int, height: Int) {
     }
 }
 
+/** Standard API 23+ resource-planning hint; opt-in, main display only. Not a guaranteed output FPS.
+ * https://developer.android.com/reference/android/media/MediaFormat#KEY_OPERATING_RATE
+ */
+internal fun videoOperatingRate(type: Int, statsLabel: String?, fps: Int, api: Int): Int =
+    if (api >= 23 && type == MAIN_SCREEN_TYPE && statsLabel == null && fps > 0) fps else 0
+
 /** Serial MediaCodec video decoder: one worker owns configure and frame feeding. */
 private class VideoDecoder(
     streamType: Int,
@@ -1012,6 +1021,7 @@ private class VideoDecoder(
     private val width: Int,
     private val height: Int,
     private val preferSoftwareHevcDecoder: Boolean,
+    operatingRate: Int = 0,
     private val requestKeyFrame: () -> Unit,
     private val report: (String) -> Unit,
     statsLabel: String? = null,
@@ -1019,6 +1029,8 @@ private class VideoDecoder(
     /** Called on the worker as its last step, after it has released its codec. */
     private val onExit: (VideoDecoder) -> Unit = {},
 ) : Closeable {
+    private var operatingRate = operatingRate
+    private var configuredOperatingRate = 0
     private val pacer = FramePacer()
     private val pacingDelay = if (pacingDelayNanos > 0) PacingDelay(pacingDelayNanos) else null
     // Per queued presentation time (decode thread only): when it was queued, and whether it is a paced
@@ -1055,11 +1067,11 @@ private class VideoDecoder(
     private var duplicateConfigLogged = false
     private var failureReports = 0
     private val referenceChain = VideoReferenceChain()
+    private val backlogRecovery = VideoBacklogRecovery()
+    private var catchUpPending = false
     private var lastKeyFrameRequestNs = 0L
     private var consecutiveInputWithoutOutput = 0
     private var consecutiveDroppedWithoutKeyFrame = 0
-    /** Issue #351: stale frames dropped while the pipeline is still rendering. */
-    private var staleFramesDropped = 0
     /** Issue #346: consecutive output stalls; forces a decoder rebuild at threshold. */
     private val stallRebuildTracker = DecoderStallRebuildTracker()
     /** Issue #216: when the current wait for an acceptable keyframe began. */
@@ -1067,7 +1079,13 @@ private class VideoDecoder(
     private var lastOutputRenderedNs = 0L
     private var surfaceAttachedAtNs = 0L
     // The main screen keeps the historical log format; other screens are labelled.
-    private val stats = VideoStats(statsLabel ?: if (streamType == MAIN_SCREEN_TYPE) "" else " stream=$streamType")
+    private val stats = VideoStats(statsLabel ?: if (streamType == MAIN_SCREEN_TYPE) "" else " stream=$streamType",
+        processCpuMillis = android.os.Process::getElapsedCpuTime,
+        processBlockingGcMillis = {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && realSdkInt() >= 23) {
+                runCatching { android.os.Debug.getRuntimeStat("art.gc.blocking-gc-time")?.toLongOrNull()?.takeIf { it >= 0 } }.getOrNull()
+            } else null
+        })
     private val thread = Thread(::run, "carplay-video").apply { isDaemon = true }
 
     fun start() { thread.start() }
@@ -1148,26 +1166,47 @@ private class VideoDecoder(
             while (running) {
                 val job = queue.poll(5)
                 try {
+                    if (job != null && job !is VideoJob.Frame) catchUpPending = false
                     when (job) {
                         is VideoJob.Config -> configureDecoder(job)
                         is VideoJob.Frame -> {
-                            if (System.nanoTime() - job.receivedNs > MAX_FRAME_AGE_NS) {
-                                // Issue #351: when frames are still rendering, the
-                                // decoder is behind but alive — drop just this stale
-                                // frame and keep feeding instead of flushing the whole
-                                // queue and waiting for a keyframe (that loop is what
-                                // made slow-decode streams stutter). A genuine stall
-                                // (nothing rendered recently) keeps the old path.
-                                if (System.nanoTime() - lastOutputRenderedNs < MIN_OUTPUT_STALL_NS) {
-                                    staleFramesDropped++
-                                    if (staleFramesDropped == 1 || staleFramesDropped % 30 == 0) {
-                                        report("video stale frame dropped count=$staleFramesDropped (decoder behind, keeping feed)")
-                                    }
-                                } else {
-                                    queue.discardFrames()
-                                    recover("video backlog exceeded 800 ms", allowRebuild = false)
+                            stats.onQueueWait(System.nanoTime() - job.receivedNs)
+                            val overloaded = if (outputSurface != null && !reverseSuspended && !referenceChain.needsKeyFrame) {
+                                val backlog = queue.backlogAfterCurrent()
+                                backlogRecovery.observe(System.nanoTime(), job.receivedNs,
+                                    backlog.pendingFrames, backlog.newestPendingReceivedNs)
+                            } else {
+                                backlogRecovery.reset()
+                                false
+                            }
+                            val config = lastConfig
+                            val skipped = if ((overloaded || catchUpPending) && config != null) {
+                                queue.advanceToLatestKeyFrame(config.codec)
+                            } else -1
+                            if (skipped >= 0) {
+                                // The queue already has an independent restart point; retain it and its dependents.
+                                catchUpPending = false
+                                backlogRecovery.reset()
+                                referenceChain.reset()
+                                stats.onCatchUp(skipped + 1)
+                                report("backlog catch-up: skipped ${skipped + 1} queued frames to available keyframe")
+                            } else if (overloaded && System.nanoTime() - job.receivedNs >= 1_500_000_000L) {
+                                // Drop the broken chain as a unit; a newer config/surface owns later frames.
+                                queue.discardCurrentChain()
+                                recover("video backlog kept growing or exceeded hard limit", allowRebuild = false)
+                            } else {
+                                if (overloaded) {
+                                    // Keep rendering the valid chain while its replacement is on the wire.
+                                    catchUpPending = true
+                                    requestKeyFrameIfDue()
                                 }
-                            } else feed(job.nalus, localTimeOf(job))
+                                if (catchUpPending && config != null &&
+                                    MediaCodecSupport.isRandomAccessFrame(job.nalus, config.codec)) {
+                                    catchUpPending = false
+                                    backlogRecovery.reset()
+                                }
+                                feed(job.nalus, localTimeOf(job))
+                            }
                         }
                         is VideoJob.SurfaceChanged -> changeSurface(job.surface)
                         is VideoJob.DetachSurface -> detach(job.request)
@@ -1219,6 +1258,7 @@ private class VideoDecoder(
                 } catch (error: Exception) {
                     if (running) Log.e(TAG, "video decoder job failed: ${job?.javaClass?.simpleName}", error)
                     if (running) reportFailure("stage=${job?.javaClass?.simpleName ?: "drain"}", error)
+                    dropOperatingRate("decoder runtime failure")
                     releaseDecoder()
                     referenceChain.reset()
                     requestKeyFrameIfDue()
@@ -1240,6 +1280,7 @@ private class VideoDecoder(
     }
 
     private fun configureDecoder(config: VideoJob.Config) {
+        catchUpPending = false
         val previous = lastConfig
         if (
             decoder != null &&
@@ -1296,7 +1337,7 @@ private class VideoDecoder(
                 START_CODE + sps + START_CODE + pps
             } else null
         } else null
-        val attempts = when {
+        val baseAttempts = when {
             nativeSizing -> {
                 Log.w(TAG, "default hardware decoder for $mime needs native port sizing on this device; trying hardware without forced input size first")
                 listOf(DecoderAttempt(codecName = null, tuned = false)) +
@@ -1316,10 +1357,22 @@ private class VideoDecoder(
                 ) + software?.let { listOf(DecoderAttempt(it, tuned = false)) }.orEmpty()
             }
         }
+        val requestedRate = operatingRate
+        val canHintHardware = !nativeSizing && !defaultBroken &&
+            !(codec == VideoCodec.H265 && preferSoftwareHevcDecoder)
+        val attempts = if (requestedRate > 0 && canHintHardware) {
+            listOf(DecoderAttempt(null, tuned = true, operatingRate = requestedRate)) + baseAttempts
+        } else baseAttempts
         var next: MediaCodec? = null
+        var used: DecoderAttempt? = null
         for (attempt in attempts) {
             next = tryConfigure(mime, csd, surface, attempt)
-            if (next != null) break
+            if (next != null) { used = attempt; break }
+        }
+        configuredOperatingRate = used?.operatingRate ?: 0
+        if (used != null && requestedRate > 0 && configuredOperatingRate == 0) {
+            operatingRate = 0
+            report("operating rate hint unavailable; keeping supported decoder settings")
         }
         if (next == null) {
             report("decoder configuration failed mime=$mime size=${width}x$height")
@@ -1329,7 +1382,18 @@ private class VideoDecoder(
         submittedFrameLogged = false
         if (next != null) {
             val decoderName = safeDecoderName(next)
-            report("decoder=$decoderName mime=$mime size=${width}x$height")
+            report("decoder=$decoderName mime=$mime size=${width}x$height " +
+                "operatingRateRequested=$requestedRate operatingRateConfigured=$configuredOperatingRate")
+            if (realSdkInt() >= 21) {
+                val configured = next
+                runCatching {
+                    val capabilities = configured.codecInfo.getCapabilitiesForType(mime).videoCapabilities
+                    if (capabilities != null) {
+                        val rates = capabilities.getSupportedFrameRatesFor(width, height)
+                        report("decoder declared frame-rate range=$rates at ${width}x$height (capability, not measured throughput)")
+                    } else report("decoder capability unavailable=no_video_capabilities")
+                }.onFailure { report("decoder capability unavailable=${it.javaClass.simpleName}") }
+            }
             Log.i(
                 TAG,
                 "video decoder configured name=$decoderName mime=$mime size=${width}x$height",
@@ -1345,13 +1409,14 @@ private class VideoDecoder(
             "unknown"
         }
 
-    private data class DecoderAttempt(val codecName: String?, val tuned: Boolean)
+    private data class DecoderAttempt(val codecName: String?, val tuned: Boolean, val operatingRate: Int = 0)
 
-    private fun buildFormat(mime: String, csd: List<ByteArray>, tuned: Boolean): MediaFormat =
+    private fun buildFormat(mime: String, csd: List<ByteArray>, attempt: DecoderAttempt): MediaFormat =
         MediaFormat.createVideoFormat(mime, width, height).apply {
-            if (tuned) {
+            if (attempt.tuned) {
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_INPUT_SIZE)
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
+                if (attempt.operatingRate > 0) setInteger(MediaFormat.KEY_OPERATING_RATE, attempt.operatingRate)
             }
             csd.forEachIndexed { index, bytes -> setByteBuffer("csd-$index", ByteBuffer.wrap(bytes)) }
         }
@@ -1364,7 +1429,7 @@ private class VideoDecoder(
     ): MediaCodec? {
         var candidate: MediaCodec? = null
         return try {
-            val format = buildFormat(mime, csd, attempt.tuned)
+            val format = buildFormat(mime, csd, attempt)
             val codec = attempt.codecName?.let { MediaCodec.createByCodecName(it) } ?: createDecoder(mime)
             candidate = codec
             if (attempt.tuned && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
@@ -1376,7 +1441,7 @@ private class VideoDecoder(
             codec
         } catch (error: Exception) {
             runCatching { candidate?.release() }
-            reportFailure("stage=configure tuned=${attempt.tuned} mime=$mime", error)
+            reportFailure("stage=configure tuned=${attempt.tuned} operatingRate=${attempt.operatingRate} mime=$mime", error)
             Log.w(
                 TAG,
                 "video decoder configure failed name=${attempt.codecName ?: "default"} " +
@@ -1558,6 +1623,14 @@ private class VideoDecoder(
         }
     }
 
+    private fun dropOperatingRate(reason: String): Boolean {
+        if (configuredOperatingRate <= 0) return false
+        operatingRate = 0
+        configuredOperatingRate = 0
+        report("operating rate hint dropped: $reason")
+        return true
+    }
+
     private fun feed(nalus: ByteArray, presentNs: Long = 0L) {
         // Issue #315: the input pump is cut while suspended for reverse —
         // frames must be dropped here, not lazily rebuild the codec below.
@@ -1608,11 +1681,17 @@ private class VideoDecoder(
             Log.i(TAG, "video decoder prepending SPS/PPS in-band to first frame (${spsPps.size} bytes)")
             spsPps + annexB
         } else annexB
+        val inputWaitStarted = System.nanoTime()
         val index = VideoInputPump.acquire(
             running = { running }, drain = { drainOutput(codec) },
             dequeue = { codec.dequeueInputBuffer(INPUT_TIMEOUT_US) },
         )
-        if (index < 0) { recover("video decoder input stalled", allowRebuild = false); return }
+        stats.onInputWait(System.nanoTime() - inputWaitStarted)
+        if (index < 0) {
+            val hintDropped = dropOperatingRate("decoder input stalled")
+            recover("video decoder input stalled", allowRebuild = false, forceRebuild = hintDropped)
+            return
+        }
         @Suppress("DEPRECATION")
         val input = if (realSdkInt() >= Build.VERSION_CODES.LOLLIPOP) codec.getInputBuffer(index) else codec.inputBuffers[index]
         checkNotNull(input) { "Decoder input buffer unavailable" }
@@ -1621,8 +1700,11 @@ private class VideoDecoder(
             input.put(frameData)
             // A paced frame carries its local time; MediaCodec returns it with the decoded output.
             val presentationUs = if (presentNs > 0) presentNs / 1000 else System.nanoTime() / 1000
-            codec.queueInputBuffer(index, 0, frameData.size, presentationUs, 0)
-            val queuedNow = System.nanoTime()
+            val submitStarted = System.nanoTime()
+            val queuedNow = try {
+                codec.queueInputBuffer(index, 0, frameData.size, presentationUs, 0)
+                System.nanoTime()
+            } finally { stats.onSubmitCall(System.nanoTime() - submitStarted) }
             if (lastQueuedNanos != 0L && queuedNow - lastQueuedNanos > STILL_GAP_NS) resumedAtNanos = queuedNow
             lastQueuedNanos = queuedNow
             queuedPresentationUs[queuedSlot] = presentationUs
@@ -1657,7 +1739,7 @@ private class VideoDecoder(
                 // rebuild even though a keyframe wait is already in progress — on the
                 // T3 unit the requested keyframes never unstick the wedged decoder,
                 // so the wait never clears and the plain path never rebuilds.
-                val forceRebuild = !reverseSuspended && stallRebuildTracker.onStall()
+                val forceRebuild = !reverseSuspended && (dropOperatingRate("decoder output stalled") || stallRebuildTracker.onStall())
                 val reason = "video decoder output stalled: $consecutiveInputWithoutOutput frames queued without output" +
                     if (forceRebuild) " (repeated stalls; forcing decoder rebuild)" else ""
                 recover(reason, allowRebuild = false, forceRebuild = forceRebuild)
@@ -1670,6 +1752,7 @@ private class VideoDecoder(
         // Issue #315: no recovery may resurrect the codec while it is
         // suspended for reverse; the delayed cold start owns the restart.
         if (reverseSuspended) return
+        catchUpPending = false
         Log.w(TAG, "Video recovery: $reason; waiting for keyframe")
         // Issue #251: while a keyframe wait is already running, rebuilding the
         // decoder races the keyframe's arrival — the rebuild discards the
@@ -1709,54 +1792,76 @@ private class VideoDecoder(
     private fun queuedSlotOf(presentationUs: Long): Int =
         queuedPresentationUs.indices.firstOrNull { queuedPresentationUs[it] == presentationUs } ?: -1
 
+    // Reused by the sole decoder worker. Keep at most one acquired output while looking ahead.
+    private val outputInfo = MediaCodec.BufferInfo()
+    private val pendingOutputInfo = MediaCodec.BufferInfo()
+
     private fun drainOutput(codec: MediaCodec) {
-        val info = MediaCodec.BufferInfo()
-        while (running) {
-            val index = codec.dequeueOutputBuffer(info, 0)
+        var pending = -1
+        var outputs = 0
+        while (running && outputs < 8) {
+            val index = codec.dequeueOutputBuffer(outputInfo, 0)
             when {
-                index == MediaCodec.INFO_TRY_AGAIN_LATER -> return
+                index == MediaCodec.INFO_TRY_AGAIN_LATER -> break
                 index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> logOutputFormat(codec.outputFormat)
                 index >= 0 -> {
-                    val render = outputSurface != null
-                    // Parked output goes to the offscreen consumer: it keeps the codec's state, but it is
-                    // not shown, so it is neither paced nor counted.
-                    val shown = render && outputSurface !== parking?.surface
-                    val now = System.nanoTime()
-                    val slot = queuedSlotOf(info.presentationTimeUs)
-                    val queued = if (slot >= 0) queuedAtNanos[slot] else 0L
-                    val heldOverGap = queued in 1 until resumedAtNanos
-                    if (queued > 0 && !heldOverGap) stats.onDecodeLatency(now - queued)
-                    val delay = pacingDelay
-                    val paced = shown && delay != null && slot >= 0 && queuedPaced[slot]
-                    val localNs = info.presentationTimeUs * 1000
-                    val pauseHeld = paced && queuedBeforePause[slot]
-                    val targetNs = if (paced && delay != null) {
-                        if (!heldOverGap && !pauseHeld) delay.onFrame(now - localNs)
-                        stats.onPacingDelay(delay.nanos)
-                        localNs + delay.nanos
-                    } else 0L
-                    if (realSdkInt() >= 21 && targetNs - now in 1..MAX_PACING_AHEAD_NS) {
-                        codec.releaseOutputBuffer(index, targetNs)
-                    } else {
-                        if (shown && delay != null && !heldOverGap && !pauseHeld) stats.onLate()
-                        codec.releaseOutputBuffer(index, render)
+                    if (pending >= 0) {
+                        val slot = queuedSlotOf(pendingOutputInfo.presentationTimeUs)
+                        val queued = if (slot >= 0) queuedAtNanos[slot] else 0L
+                        // Discard decoded pictures only when late AND a newer output is already available.
+                        // Compressed references remain intact; the final/static picture is always released normally.
+                        val skip = pacingDelay == null && queued > 0 && System.nanoTime() - queued >= 150_000_000L
+                        releaseDecodedOutput(codec, pending, pendingOutputInfo, skip)
                     }
-                    if (shown) {
-                        stats.onRendered()
-                        consecutiveInputWithoutOutput = 0
-                        staleFramesDropped = 0
-                        stallRebuildTracker.onOutput()
-                        lastOutputRenderedNs = now
-                    }
-                    if (shown && !renderedFrameLogged) {
-                        renderedFrameLogged = true
-                        report("first frame rendered")
-                        Log.i(TAG, "video decoder rendered first frame bytes=${info.size}")
-                    }
-                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return
+                    pending = index
+                    pendingOutputInfo.set(outputInfo.offset, outputInfo.size, outputInfo.presentationTimeUs, outputInfo.flags)
+                    outputs++
+                    if (outputInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
                 }
-                else -> return
+                else -> break
             }
+        }
+        if (pending >= 0) releaseDecodedOutput(codec, pending, pendingOutputInfo, skipPresentation = false)
+    }
+
+    private fun releaseDecodedOutput(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo, skipPresentation: Boolean) {
+        val render = outputSurface != null && !skipPresentation
+        // Parked output goes to the offscreen consumer: it keeps the codec's state, but it is
+        // not shown, so it is neither paced nor counted.
+        val shown = outputSurface != null && outputSurface !== parking?.surface
+        val now = System.nanoTime()
+        val slot = queuedSlotOf(info.presentationTimeUs)
+        val queued = if (slot >= 0) queuedAtNanos[slot] else 0L
+        val heldOverGap = queued in 1 until resumedAtNanos
+        if (queued > 0 && !heldOverGap) stats.onDecodeLatency(now - queued)
+        val delay = pacingDelay
+        val paced = shown && !skipPresentation && delay != null && slot >= 0 && queuedPaced[slot]
+        val localNs = info.presentationTimeUs * 1000
+        val pauseHeld = paced && queuedBeforePause[slot]
+        val targetNs = if (paced && delay != null) {
+            if (!heldOverGap && !pauseHeld) delay.onFrame(now - localNs)
+            stats.onPacingDelay(delay.nanos)
+            localNs + delay.nanos
+        } else 0L
+        val releaseStarted = System.nanoTime()
+        try {
+            if (realSdkInt() >= 21 && targetNs - now in 1..MAX_PACING_AHEAD_NS) {
+                codec.releaseOutputBuffer(index, targetNs)
+            } else {
+                if (shown && !skipPresentation && delay != null && !heldOverGap && !pauseHeld) stats.onLate()
+                codec.releaseOutputBuffer(index, render)
+            }
+        } finally { stats.onReleaseCall(System.nanoTime() - releaseStarted) }
+        if (shown) {
+            if (skipPresentation) stats.onSkippedOutput() else stats.onRendered()
+            consecutiveInputWithoutOutput = 0
+            stallRebuildTracker.onOutput()
+            lastOutputRenderedNs = now
+        }
+        if (shown && !skipPresentation && !renderedFrameLogged) {
+            renderedFrameLogged = true
+            report("first frame rendered")
+            Log.i(TAG, "video decoder rendered first frame bytes=${info.size}")
         }
     }
 
@@ -1814,7 +1919,6 @@ private class VideoDecoder(
         const val TAG = "xcertplay-usb"
         const val MAX_INPUT_SIZE = 8 * 1024 * 1024
         const val INPUT_TIMEOUT_US = 10_000L
-        const val MAX_FRAME_AGE_NS = 800_000_000L
         // A paced frame more than this ahead is treated as a bad mapping and shown at once.
         const val MAX_PACING_AHEAD_NS = 1_000_000_000L
         // Longer input gaps are a still screen, not decoding work.
@@ -2943,3 +3047,4 @@ private class AudioRenderer(
         const val DEGENERATE_DECODER_MIN_INPUTS = 120
     }
 }
+

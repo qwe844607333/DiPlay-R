@@ -634,8 +634,9 @@ class CarPlayController(
     fun sendTouch(contacts: List<AirPlayContact>): Boolean {
         if (closed) return false
         val session = activeSession ?: return false
+        val enqueuedNs = System.nanoTime()
         return try {
-            touchExecutor.execute { session.sendTouch(contacts) }
+            touchExecutor.execute { session.sendTouch(contacts, System.nanoTime() - enqueuedNs) }
             true
         } catch (_: Exception) {
             false
@@ -3514,7 +3515,11 @@ class CarPlayController(
             }
             WirelessHotspotMode.EXISTING_WIFI -> ExistingWifiManager(
                 appContext, config.existingWifiSsid, config.existingWifiPassphrase, ::debugLog,
-                onNetworkChanged = { if (!isStaleWirelessRun(generation)) restartWireless() },
+                onNetworkChanged = {
+                    Thread({
+                        if (!isStaleWirelessRun(generation)) restartWireless()
+                    }, "diplay-wifi-link-restart").apply { isDaemon = true; start() }
+                },
             )
             WirelessHotspotMode.MANUAL -> ManualHotspotManager(
                 context = appContext,

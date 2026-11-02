@@ -54,6 +54,30 @@ class CarPlayConnectionDiagnosticLogTest {
         assertFalse(log.contains("private-token"))
     }
 
+    @Test fun videoDiagnosticsDoNotWaitForDiskOnTheUiThread() {
+        val currentListener = activity.javaClass.getDeclaredMethod("createSessionListener", Int::class.javaPrimitiveType)
+            .apply { isAccessible = true }.invoke(activity, 2) as AirPlaySessionListener
+        val target = activity.javaClass.getDeclaredField("sessionLog").apply { isAccessible = true }.get(activity)!!
+        val diskLock = checkNotNull(target.javaClass.getDeclaredField("lock").apply { isAccessible = true }.get(target))
+        val held = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val timedOut = java.util.concurrent.atomic.AtomicBoolean(false)
+        val disk = kotlin.concurrent.thread {
+            synchronized(diskLock) {
+                held.countDown()
+                if (!release.await(5, java.util.concurrent.TimeUnit.SECONDS)) timedOut.set(true)
+            }
+        }
+        try {
+            assertTrue(held.await(1, java.util.concurrent.TimeUnit.SECONDS))
+            currentListener.onDebugLog("Video: video stats rx=60.0fps shown=60.0fps")
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+            assertFalse("the UI callback returned before disk became available", timedOut.get())
+        } finally { release.countDown(); disk.join(2000) }
+        assertTrue(AsyncDiagnosticLog.awaitIdle(2000))
+        assertTrue(log.contains("Video: video stats rx=60.0fps"))
+    }
+
     @Test fun wirelessStepsAreRecordedInSessionLogEvenWhenMenuIsOpen() {
         val currentListener = activity.javaClass.getDeclaredMethod("createSessionListener", Int::class.javaPrimitiveType)
             .apply { isAccessible = true }.invoke(activity, 2) as AirPlaySessionListener
@@ -64,6 +88,7 @@ class CarPlayConnectionDiagnosticLogTest {
         currentListener.onDebugLog("WIRELESS-CHAIN [12/12] SUCCESS: AirPlay session active")
 
         org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+        assertTrue(AsyncDiagnosticLog.awaitIdle(2_000))
         assertTrue(log.contains("WIRELESS-CHAIN [1/12]"))
         assertTrue(log.contains("WIRELESS-CHAIN [3/12]"))
         assertTrue(log.contains("WIRELESS-CHAIN [12/12]"))

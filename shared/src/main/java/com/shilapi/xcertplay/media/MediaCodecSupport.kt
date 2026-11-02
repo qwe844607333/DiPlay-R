@@ -94,6 +94,24 @@ object MediaCodecSupport {
         return output
     }
 
+    /** Inspect queued access units without allocating an Annex B copy during backlog scans. */
+    fun isRandomAccessFrame(bytes: ByteArray, codec: VideoCodec): Boolean {
+        if (bytes.size >= 4 && bytes[0] == 0.toByte() && bytes[1] == 0.toByte() &&
+            bytes[2] == 0.toByte() && bytes[3] == 1.toByte()) return isRandomAccess(bytes, codec)
+        var cursor = 0
+        var independent = false
+        while (cursor + 4 <= bytes.size) {
+            val size = readU32Be(bytes, cursor)
+            cursor += 4
+            if (size <= 0 || size > bytes.size - cursor) return false
+            val header = bytes[cursor].toInt() and 255
+            if (codec == VideoCodec.H264 && header and 31 == 5) independent = true
+            if (codec == VideoCodec.H265 && size >= 2 && (header shr 1 and 63) in 16..21) independent = true
+            cursor += size
+        }
+        return cursor == bytes.size && independent
+    }
+
     /** IDR (AVC) or IRAP (HEVC) starts an independently decodable reference chain. */
     fun isRandomAccess(annexB: ByteArray, codec: VideoCodec): Boolean {
         var cursor = 0

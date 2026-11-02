@@ -97,6 +97,7 @@ object AirPlayPersistence {
     private const val KEY_CALL_VOICE_FILTER = "call_voice_filter"
     private const val KEY_CALL_MIC_COMPATIBILITY = "call_mic_compatibility"
     private const val KEY_SMOOTH_VIDEO = "smooth_video"
+    private const val KEY_DECODER_RATE_HINT = "decoder_rate_hint"
     private const val KEY_CAR_BLUETOOTH_AUDIO = "car_bluetooth_audio"
     private const val KEY_DIRECT_SURFACE_VIEW = "direct_surface_view"
     private const val KEY_DIRECT_USBFS_MODE = "direct_usbfs_mode"
@@ -137,10 +138,11 @@ object AirPlayPersistence {
     private const val KEY_CUSTOM_BLUETOOTH_MAC = "custom_bluetooth_mac"
     private const val SAFE_AREA_KEY_PREFIX = "safe_area_"
     private const val CUSTOM_ICON_FILE = "airplay-icon.png"
+    private const val KEY_PERSONAL_CAR_DEFAULTS = "personal_shadowr_car_defaults_v1"
 
     const val DEFAULT_MANUFACTURER = "DiPlay"
     const val DEFAULT_MODEL = "DiPlay"
-    const val DEFAULT_OEM_LABEL = "BYD"
+    const val DEFAULT_OEM_LABEL = "影豹R"
     const val DEFAULT_MFI_I2C_PATH = "/dev/i2c-1"
 
     fun loadAmbientDelaySeconds(context: Context): Int =
@@ -624,15 +626,26 @@ object AirPlayPersistence {
             .apply()
     }
 
-    fun loadOemLabel(context: Context): String =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_OEM_LABEL, DEFAULT_OEM_LABEL)
+    fun loadOemLabel(context: Context): String {
+        val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (!preferences.getBoolean(KEY_PERSONAL_CAR_DEFAULTS, false)) {
+            val previous = preferences.getString(KEY_OEM_LABEL, null)
+            val editor = preferences.edit().putBoolean(KEY_PERSONAL_CAR_DEFAULTS, true)
+            // Migrate the previous personal default once, preserving custom car names and icons.
+            if ((previous.isNullOrBlank() || previous == "BYD") && loadCustomAirPlayIconFile(context) == null) {
+                editor.putString(KEY_OEM_LABEL, DEFAULT_OEM_LABEL)
+            }
+            editor.apply()
+        }
+        return preferences.getString(KEY_OEM_LABEL, DEFAULT_OEM_LABEL)
             // iOS hides the car icon without a label.
             .orEmpty().ifBlank { DEFAULT_OEM_LABEL }
+    }
 
     fun saveOemLabel(context: Context, oemLabel: String) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(KEY_OEM_LABEL, oemLabel)
+            .putBoolean(KEY_PERSONAL_CAR_DEFAULTS, true)
             .apply()
     }
 
@@ -675,7 +688,7 @@ object AirPlayPersistence {
 
     fun loadFps(context: Context): Int = AirPlayDisplaySettings.sanitizeFps(
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getInt(KEY_FPS, 30),
+            .getInt(KEY_FPS, 60),
     )
 
     fun loadMediaBufferMillis(context: Context): Int = com.shilapi.xcertplay.media.MediaAudioBuffer.sanitize(
@@ -697,6 +710,14 @@ object AirPlayPersistence {
 
     fun saveCarBluetoothAudio(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_CAR_BLUETOOTH_AUDIO, enabled).apply()
+    }
+
+    /** Opt-in resource-planning request for the main decoder; applied at reconnect. */
+    fun loadDecoderRateHint(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_DECODER_RATE_HINT, false)
+
+    fun saveDecoderRateHint(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_DECODER_RATE_HINT, enabled).apply()
     }
 
     fun loadSmoothVideo(context: Context): Boolean =

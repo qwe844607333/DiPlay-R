@@ -9,6 +9,7 @@ import android.net.NetworkRequest
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Handler
 import com.shilapi.xcertplay.compat.realSdkInt
 import android.os.Looper
 import com.shilapi.xcertplay.orchestration.ManualHotspotValidation
@@ -48,17 +49,39 @@ class ExistingWifiManager(
     @Volatile private var interfaceName: String? = null
     private var callbackRegistered = false
     private var legacy: LegacyExistingWifi? = null
+    private val linkCheckHandler by lazy { Handler(Looper.getMainLooper()) }
+    private var pendingLinkReason: String? = null
+    private val confirmLinkChange = Runnable {
+        val reason = synchronized(lock) {
+            val pending = pendingLinkReason ?: return@synchronized null
+            pendingLinkReason = null
+            if (closed || invalidated.get()) null
+            else if (Build.VERSION.SDK_INT >= 21 && selectedLinkUsable()) {
+                onDiagnostic("Existing Wi-Fi link restored within 1500ms; keeping session")
+                null
+            } else pending
+        }
+        // The controller's restart can close this manager from another thread.
+        if (reason != null) invalidate(reason)
+    }
 
     private val callback by lazy { if (realSdkInt() >= 21) modernCallback() else null }
 
     @androidx.annotation.RequiresApi(21)
     private fun modernCallback() = object : ConnectivityManager.NetworkCallback() {
         override fun onLost(network: Network) {
-            if (network == selected) invalidate("network lost")
+            if (network == selected) checkLinkAfterGrace("network lost")
+        }
+
+        override fun onAvailable(network: Network) {
+            if (network == selected && selectedLinkUsable()) cancelLinkCheck()
         }
 
         override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) {
-            if (network == selected && !sameLink(properties)) invalidate("interface or address changed")
+            if (network == selected) {
+                if (sameLink(properties) && selectedLinkUsable()) cancelLinkCheck()
+                else checkLinkAfterGrace("interface or address changed")
+            }
         }
     }
 
@@ -180,7 +203,31 @@ class ExistingWifiManager(
     @androidx.annotation.RequiresApi(21)
     private fun sameLink(properties: LinkProperties): Boolean =
         properties.interfaceName == interfaceName && properties.linkAddresses.any { it.address == host } &&
-            existingWifiHostAddresses(properties.linkAddresses.map { it.address }, interfaceIndex).toSet() == hosts.toSet()
+            existingWifiHostAddresses(properties.linkAddresses.map { it.address }, interfaceIndex).containsAll(hosts)
+
+    @androidx.annotation.RequiresApi(21)
+    private fun selectedLinkUsable(): Boolean = runCatching {
+        val network = selected ?: return@runCatching false
+        network in connectivity.allNetworks &&
+            connectivity.getNetworkCapabilities(network)?.let {
+                it.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                    !it.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+            } == true && connectivity.getLinkProperties(network)?.let(::sameLink) == true
+    }.getOrDefault(false)
+
+    private fun checkLinkAfterGrace(reason: String) = synchronized(lock) {
+        if (closed || invalidated.get() || pendingLinkReason != null) return@synchronized
+        pendingLinkReason = reason
+        onDiagnostic("Existing Wi-Fi $reason; checking link for 1500ms before restart")
+        linkCheckHandler.postDelayed(confirmLinkChange, 1_500L)
+    }
+
+    private fun cancelLinkCheck() = synchronized(lock) {
+        if (pendingLinkReason == null) return@synchronized
+        pendingLinkReason = null
+        linkCheckHandler.removeCallbacks(confirmLinkChange)
+        onDiagnostic("Existing Wi-Fi link restored within 1500ms; keeping session")
+    }
 
     private fun security(): Iap2WirelessSecurity =
         if (passphrase.isEmpty()) Iap2WirelessSecurity.NONE else Iap2WirelessSecurity.WPA_WPA2
@@ -198,11 +245,15 @@ class ExistingWifiManager(
     }
 
     override fun connectionDiagnosticSnapshot(): String =
-        "existingWifiLink=${if (closed || invalidated.get()) "lost" else "attached"}"
+        synchronized(lock) { "existingWifiLink=${if (closed || invalidated.get()) "lost" else if (pendingLinkReason != null) "checking" else "attached"}" }
 
     override fun close() {
         synchronized(lock) {
             closed = true
+            if (pendingLinkReason != null) {
+                pendingLinkReason = null
+                linkCheckHandler.removeCallbacks(confirmLinkChange)
+            }
             legacy?.close()
             if (realSdkInt() >= 21 && callbackRegistered) {
                 connectivity.unregisterNetworkCallback(checkNotNull(callback))

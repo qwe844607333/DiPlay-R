@@ -27,6 +27,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Mockito.*
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.shadows.ShadowLooper
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
@@ -110,6 +111,8 @@ class ExistingWifiManagerTest {
             start(it)
             properties.setLinkAddresses(listOf(linkAddress("fe80::1234/64")))
             callback.onLinkPropertiesChanged(network, properties)
+            assertEquals("temporary address loss must not tear down the session immediately", 0, changes)
+            advanceGrace()
             assertEquals(1, changes)
         }
     }
@@ -204,14 +207,159 @@ class ExistingWifiManagerTest {
             properties.setDnsServers(listOf(InetAddress.getByName("192.0.2.1")))
             callback.onLinkPropertiesChanged(network, properties)
             assertEquals(0, changes)
-            callback.onLinkPropertiesChanged(network, link("192.0.2.11/24"))
+            properties = link("192.0.2.11/24")
+            callback.onLinkPropertiesChanged(network, properties)
             callback.onLost(network)
+            assertEquals(0, changes)
+            advanceGrace()
             assertEquals(1, changes)
         }
         callback.onLost(network)
         assertEquals(1, changes)
         assertTrue(diagnostics.any { it.contains("address changed") })
     }
+
+    @Test fun briefLossOfSelectedNetworkKeepsTheExistingSession() {
+        manager().use {
+            start(it)
+            `when`(connectivity.allNetworks).thenReturn(emptyArray())
+            callback.onLost(network)
+            assertEquals("a transient callback must not restart an otherwise usable session", 0, changes)
+            ShadowLooper.idleMainLooper(750, TimeUnit.MILLISECONDS)
+            `when`(connectivity.allNetworks).thenReturn(arrayOf(network))
+            callback.onAvailable(network)
+            advanceGrace()
+            assertEquals(0, changes)
+        }
+    }
+
+    @Test fun transientAddressRemovalCanRecoverBeforeTheDeadline() {
+        manager().use {
+            start(it)
+            properties = link("192.0.2.11/24")
+            callback.onLinkPropertiesChanged(network, properties)
+            assertEquals(0, changes)
+            ShadowLooper.idleMainLooper(750, TimeUnit.MILLISECONDS)
+            properties = link("192.0.2.10/24")
+            callback.onLinkPropertiesChanged(network, properties)
+            advanceGrace()
+            assertEquals(0, changes)
+        }
+    }
+
+    @Test fun persistentNetworkLossRestartsOnceAfterTheOriginalDeadline() {
+        manager().use {
+            start(it)
+            `when`(connectivity.allNetworks).thenReturn(emptyArray())
+            callback.onLost(network)
+            assertEquals(0, changes)
+            ShadowLooper.idleMainLooper(1_000, TimeUnit.MILLISECONDS)
+            callback.onLost(network)
+            ShadowLooper.idleMainLooper(499, TimeUnit.MILLISECONDS)
+            assertEquals("repeated callbacks must not shorten the grace period", 0, changes)
+            ShadowLooper.idleMainLooper(1, TimeUnit.MILLISECONDS)
+            assertEquals("repeated callbacks must not postpone a real disconnect indefinitely", 1, changes)
+            callback.onLost(network)
+            advanceGrace()
+            assertEquals(1, changes)
+        }
+    }
+
+    @Test fun restoredNetworkSnapshotDoesNotNeedARestorationCallback() {
+        manager().use {
+            start(it)
+            `when`(connectivity.allNetworks).thenReturn(emptyArray())
+            callback.onLost(network)
+            `when`(connectivity.allNetworks).thenReturn(arrayOf(network))
+            advanceGrace()
+            assertEquals("the delayed check must use the current selected-network snapshot", 0, changes)
+        }
+    }
+
+    @Test fun anAddedIpv6AddressDoesNotInvalidateTheAdvertisedAddresses() {
+        manager().use {
+            start(it)
+            properties.setLinkAddresses(properties.linkAddresses + linkAddress("fe80::1234/64"))
+            callback.onLinkPropertiesChanged(network, properties)
+            advanceGrace()
+            assertEquals(0, changes)
+        }
+    }
+
+    @Test fun losingAnAdvertisedSecondaryAddressStillRestarts() {
+        properties.setLinkAddresses(properties.linkAddresses + linkAddress("fe80::1234/64"))
+        manager().use {
+            start(it)
+            properties = link("192.0.2.10/24")
+            callback.onLinkPropertiesChanged(network, properties)
+            assertEquals(0, changes)
+            advanceGrace()
+            assertEquals("published IPv6 endpoints must not become silently stale", 1, changes)
+        }
+    }
+
+    @Test fun aReplacementNetworkCannotSilentlyReuseSocketsFromTheLostNetwork() {
+        val replacement = mock(Network::class.java)
+        manager().use {
+            start(it)
+            `when`(connectivity.allNetworks).thenReturn(arrayOf(replacement))
+            doReturn(capabilities(NetworkCapabilities.TRANSPORT_WIFI)).`when`(connectivity).getNetworkCapabilities(replacement)
+            `when`(connectivity.getLinkProperties(replacement)).thenReturn(properties)
+            callback.onLost(network)
+            callback.onAvailable(replacement)
+            advanceGrace()
+            assertEquals("an identical address on a different Network still needs fresh sockets", 1, changes)
+        }
+    }
+
+    @Test fun unrelatedNetworkCallbacksDoNotAffectTheSelectedSession() {
+        val other = mock(Network::class.java)
+        manager().use {
+            start(it)
+            callback.onLost(other)
+            callback.onLinkPropertiesChanged(other, link("192.0.2.11/24"))
+            advanceGrace()
+            assertEquals(0, changes)
+        }
+    }
+
+    @Test fun closeCancelsAPendingLossCheck() {
+        val manager = manager()
+        start(manager)
+        `when`(connectivity.allNetworks).thenReturn(emptyArray())
+        callback.onLost(network)
+        assertEquals(0, changes)
+        manager.close()
+        advanceGrace()
+        assertEquals("closed managers must not trigger a new session restart", 0, changes)
+        verify(connectivity).unregisterNetworkCallback(callback)
+    }
+
+    @Test fun confirmedLossDoesNotCallTheControllerWhileHoldingTheManagerLock() {
+        val closedOnWorker = java.util.concurrent.CountDownLatch(1)
+        lateinit var manager: ExistingWifiManager
+        var closeWorker: Thread? = null
+        manager = ExistingWifiManager(context, "Pocket Wi-Fi", "pocket-password", diagnostics::add, {
+            closeWorker = Thread {
+                try { manager.close() } finally { closedOnWorker.countDown() }
+            }.apply { start() }
+            assertTrue("the controller callback must let a concurrent teardown close its manager",
+                closedOnWorker.await(1, TimeUnit.SECONDS))
+        })
+        try {
+            start(manager)
+            `when`(connectivity.allNetworks).thenReturn(emptyArray())
+            callback.onLost(network)
+            advanceGrace()
+            assertEquals(0L, closedOnWorker.count)
+        } finally {
+            manager.close()
+            closeWorker?.join(1_000)
+            assertFalse(closeWorker?.isAlive == true)
+        }
+    }
+
+    private fun advanceGrace() = ShadowLooper.idleMainLooper(1_500, TimeUnit.MILLISECONDS)
 
     @Test fun refusesAmbiguousWifiNetworksAndInvalidCredentials() {
         val other = mock(Network::class.java)

@@ -154,6 +154,7 @@ class ScreenStream(
     private fun onMessage(header: ByteArray, body: ByteArray, stats: StreamReceiveStats, arrivalNanos: Long) {
         when (header[OPCODE_OFFSET].toInt() and 0xff) {
             OP_VIDEO_FRAME -> {
+                if (body.size >= ScreenCodec.TAG_SIZE) stats.videoFrameTiming(ScreenCodec.senderNanos(header), arrivalNanos)
                 // Every received video frame from iPhone advances the ChaCha nonce by 1.
                 // We capture the nonce at reception time so each frame keeps its exact
                 // nonce regardless of worker queue depth, delays, or dropped frames (#249).
@@ -210,7 +211,7 @@ class ScreenStream(
             try {
                 ScreenCodec.decryptFrame(key, frameNonce, header, body)
                     .also {
-                        stats.decrypted(System.nanoTime() - start, body.size)
+                        stats.decrypted(System.nanoTime() - start, body.size, (start - arrivalNanos).coerceAtLeast(0L))
                         decryptFailures.set(0)
                     }
             } catch (error: Exception) {

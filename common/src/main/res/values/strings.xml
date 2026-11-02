@@ -838,4 +838,6 @@
     <string name="settings_legacy_hotspot_description">On the next connection or when DiPlay opens, turn off regular Wi-Fi and start the saved car hotspot. Keep its name and password. For boot startup, also enable “Open after the car starts”. No ADB authorization is needed on this unit.</string>
     <string name="settings_media_focus_exclusive">Exclusive media audio focus</string>
     <string name="settings_media_focus_exclusive_description">Request permanent focus for media instead of letting other players duck CarPlay. Only helps head units that duck CarPlay to silence; it can mute other players. Takes effect on the next connection.</string>
+    <string name="settings_decoder_rate_hint">Request decoder performance for selected FPS (experimental)</string>
+    <string name="settings_decoder_rate_hint_description">Requests decoder resources for the selected frame rate. May increase power use and heat. Falls back to compatible settings if rejected. Applies at the next connection.</string>
 </resources>

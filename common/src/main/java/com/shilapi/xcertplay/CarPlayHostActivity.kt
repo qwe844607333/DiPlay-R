@@ -4374,10 +4374,10 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun updateAirPlayIconPreview() {
         val preview = iconPreviewView ?: return
         val customBitmap = AirPlayPersistence.loadCustomAirPlayIconBitmap(this)
-        val bitmap = customBitmap ?: BitmapFactory.decodeResource(resources, R.raw.placeholder_icon)
+        val bitmap = customBitmap ?: BitmapFactory.decodeResource(resources, R.raw.ic_car_home)
         preview.setImageBitmap(bitmap)
         iconStatusView?.text =
-            if (customBitmap != null) getString(R.string.custom_1_1_icon) else getString(R.string.default_placeholder_icon)
+            if (customBitmap != null) getString(R.string.custom_1_1_icon) else getString(R.string.default_icon)
     }
 
     private fun currentActivitySize(): DisplaySize? {
@@ -4532,6 +4532,7 @@ class CarPlayHostActivity : ComponentActivity() {
             callMicCompatibility = AirPlayPersistence.loadCallMicCompatibility(this),
             // Only a SurfaceView honours release timestamps; smooth video always selects one.
             videoPacingDelayMillis = if (smoothVideo) smoothVideoDelayMillis(fps) else 0,
+            mainVideoFrameRate = if (AirPlayPersistence.loadDecoderRateHint(this)) fps else 0,
         )
     }
 
@@ -4655,11 +4656,8 @@ class CarPlayHostActivity : ComponentActivity() {
                         return@runOnUiThread
                     }
                     DisplayDiagnosticSnapshot.record(this@CarPlayHostActivity, displayDiagnosticAttempt, message)
-                    if (message.startsWith(PROTOCOL_TRACE_PREFIX)) {
-                        appendFileLog(message)
-                    } else {
-                        appendLog(message)
-                    }
+                    // A slow append/rotation must not hold touch/UI dispatch. Keep the captured session target.
+                    AsyncDiagnosticLog.append(diagnosticLog, message)
                 }
             }
 
@@ -6209,9 +6207,6 @@ class CarPlayHostActivity : ComponentActivity() {
         sessionLog?.append(formattedLogLine(safe, System.currentTimeMillis()))
     }
 
-    private fun appendFileLog(message: String) {
-        sessionLog?.append(formattedLogLine(message, System.currentTimeMillis()))
-    }
 
     private fun formattedLogLine(message: String, nowMillis: Long): String =
         "${SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date(nowMillis))}  $message"
@@ -6431,7 +6426,6 @@ class CarPlayHostActivity : ComponentActivity() {
          */
         @Volatile
         private var crashDiagnosticLog: SessionLogFile? = null
-        const val PROTOCOL_TRACE_PREFIX = "TRACE "
         const val SETTINGS_SWIPE_DISTANCE_DP = 72
         const val SETTINGS_SWIPE_DIRECTION_RATIO = 1.15f
         const val MAX_SETTINGS_MENU_WIDTH_PX = 1200
@@ -6556,3 +6550,4 @@ internal object CarPlayBackgroundSession {
         display = null
     }
 }
+
