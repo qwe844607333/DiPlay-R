@@ -1,26 +1,44 @@
-# DiPlay Legacy Android
+# DiPlay-R — EMPOW R / MSM8996 optimized edition
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-> This project is modified from [shihabal3amri/DiPlay](https://github.com/shihabal3amri/DiPlay) with deep compatibility refactoring.
->
-> **Scope difference with upstream**:
-> - Upstream DiPlay supports **Android 7.0+ (API 24)** in latest releases, primarily targeting modern 64-bit platforms.
-> - This project focuses on **Android 4.4 KitKat (API 19) through Android 6.0**, as well as legacy 32-bit automotive hardware architectures (`armeabi-v7a`, `x86`, Allwinner T3, MediaTek, AC8227L), low-level Linux usbfs driver hardening, and proprietary Bluetooth stacks (e.g., Hangsheng HSAE for Dongfeng Nissan).
->
-> Upstream project: https://github.com/shihabal3amri/DiPlay
+**A personal DiPlay maintenance branch focused on the GAC Trumpchi EMPOW R (影豹R) head unit with a Qualcomm MSM8996 processor.** Optimization is guided by logs from its Android 8.1 / API 27, arm64-v8a, 1920×720 configuration, with the goal of responsive wireless CarPlay at a requested 60 fps. The app package remains `com.shihab.diplay`.
 
-**CarPlay for compatible BYD and legacy Android head units.** Wired and wireless, with the familiar DiAuto interface. Independent app: `com.shihab.diplay`.
+This branch builds on [DiPlay Legacy Android](https://github.com/programmerguohuajing/DiPlay-Legacy-Android) and [shihabal3amri/DiPlay](https://github.com/shihabal3amri/DiPlay). It retains their legacy Android compatibility work; those inherited paths do not imply verified compatibility with every vehicle or firmware. The video and recovery work also improves shared pipeline code.
 
-> **BYD support scope:** These projects focus on BYD cars. They may work on other brands, but other brands are unsupported and there are no plans to add support or fix brand-specific incompatibilities.
-
-[Download & website](https://programmerguohuajing.github.io/DiPlay-Legacy-Android/) · [Releases](https://github.com/programmerguohuajing/DiPlay-Legacy-Android/releases) · [Report a problem](https://github.com/programmerguohuajing/DiPlay-Legacy-Android/issues/new/choose)
+[Repository](https://github.com/qwe844607333/DiPlay-R) · [Releases](https://github.com/qwe844607333/DiPlay-R/releases) · [Report a problem](https://github.com/qwe844607333/DiPlay-R/issues/new)
 
 ![DiPlay home](site/assets/home.png)
 
-## Current release — 0.2.88
+## Current personal version — 0.3.13 (versionCode 133)
 
-Install on the **car**, not the iPhone. No jailbreak, dongle, Mac, account or authentication server is required for use. Core CarPlay does not require ADB; optional dashboard, battery, wheel-speed and parked-video features do. Your head unit must permit APK installation. The APK installs on Android 4.2+ (API 17); the tested legacy baseline is Android 4.4 through 6.0, and it also runs on current Android versions. Wireless supports Wi-Fi Direct, the car's own hotspot, Existing Wi-Fi / Same LAN, and — on rooted units whose framework cannot open a hotspot at all — an experimental root hostapd mode (Settings → Advanced). Android 9 Wi-Fi Direct uses a firmware-dependent legacy path with generated group credentials and unverified requested frequency; see [Android 9 Wi-Fi Direct](docs/ANDROID9_WIFI_DIRECT.md). Android 10+ verifies its negotiated group frequency. See [Releases](https://github.com/programmerguohuajing/DiPlay-Legacy-Android/releases) for the current version and its notes.
+### EMPOW R / MSM8996 optimization
+
+| Item | Target configuration |
+| --- | --- |
+| Vehicle | GAC Trumpchi EMPOW R (影豹R) |
+| Processor / ABI | Qualcomm MSM8996 / arm64-v8a |
+| Android | 8.1 / API 27 |
+| Display | 1920×720; the system reports 59 Hz, not an external measurement |
+| Wireless topology | iPhone and head unit on the same external 5 GHz Wi-Fi network |
+
+Latest changes:
+
+- **Keep video moving during short overloads.** Request a new keyframe while continuing the valid H.264 reference chain. When an independent keyframe is already queued, resume from the newest usable one without discarding later configuration or Surface work. Persistent overload still has a hard-limit recovery path.
+- **Avoid presenting every obsolete decoded picture.** With Smooth video off, an output that has waited at least 150 ms since codec submission can be skipped when a newer decoded output is already available. The final picture is still presented, and compressed predictive frames are not arbitrarily dropped.
+- **Tolerate brief Wi-Fi changes.** Confirm a selected-network or advertised-address loss for 1.5 seconds before restarting. Keep the session if the original link recovers; reconnect on persistent loss or a different Network. Adding an IPv6 address alone no longer forces a restart, and restart work stays off the UI thread.
+- **Reduce overhead during recovery.** Inspect queued keyframes without copying their video payloads. Retain the earlier queue-accounting, background diagnostic-writing and lazy protocol-trace fixes.
+- **Make bottlenecks visible.** Diagnostics separate receive/decrypt, software-queue, codec-input, codec-output and release waits, with touch-queue and application CPU/GC measurements. `skippedOutputs` and `catchUpFrames` explain intentional catch-up work; `shown` counts submitted outputs, not physical screen fps.
+- **Personalize the car button.** The default label is **影豹R**, with a red R redrawn from the supplied reference. The [vector master](docs/assets/yingbao-r.svg) is resolution independent; the embedded icon stays within 192×192 / 32 KB. The old untouched BYD default migrates once; custom names and icons remain saved.
+- **Request 60 fps on a fresh installation.** Upgrades preserve the saved frame rate. If it is still 30, select 60 in Display settings and reconnect.
+
+Recommended starting configuration: **H.264 / 60 fps / 80% resolution / hardware-layer rendering on**, with **Smooth video** and **Request decoder performance at the selected frame rate** off. If overloaded, keep 60 fps and compare one lower resolution setting. Use 30 fps only as a diagnostic comparison; forcing all CPU cores, GPU rendering or additional swap is not an established fix.
+
+**Validation:** the 0.3.13 delivery completed 2,398 tests successfully, with 6 existing platform-dependent skips, plus CI/lint/build and signing checks. Sustained 60 fps and disconnect recovery on the physical EMPOW R have not been verified. A requested frame rate, the reported display refresh rate and submitted output counts do not establish measured presentation performance. See [0.3.13 release notes](docs/RELEASE-NOTES-0.3.13-PERSONAL.md) and [personal signing / upgrade rules](docs/PERSONAL-MAINTENANCE.md). Same-key personal versions can update in place; migration from another signing identity requires a one-time uninstall, which removes app settings.
+
+### Inherited connection and legacy compatibility
+
+Install on the **car**, not the iPhone. No jailbreak, dongle, Mac, account or authentication server is required for use. Core CarPlay does not require ADB; optional dashboard, battery, wheel-speed and parked-video features do. Your head unit must permit APK installation. The APK installs on Android 4.2+ (API 17); the tested legacy baseline is Android 4.4 through 6.0, and it also runs on current Android versions. Wireless supports Wi-Fi Direct, the car's own hotspot, Existing Wi-Fi / Same LAN, and — on rooted units whose framework cannot open a hotspot at all — an experimental root hostapd mode (Settings → Advanced). Android 9 Wi-Fi Direct uses a firmware-dependent legacy path with generated group credentials and unverified requested frequency; see [Android 9 Wi-Fi Direct](docs/ANDROID9_WIFI_DIRECT.md). Android 10+ verifies its negotiated group frequency. See [Releases](https://github.com/qwe844607333/DiPlay-R/releases) for the current version and its notes.
 
 - Wired USB and wireless CarPlay with local authentication.
 - BYD HUD navigation with arrows, distance and street names on verified firmware.
@@ -33,7 +51,7 @@ Install on the **car**, not the iPhone. No jailbreak, dongle, Mac, account or au
 
 This is **not an Apple-certified product**. The APK bundles an experimental accessory identity recovered from public Carlinkit firmware, not a newly provisioned MFi identity for DiPlay. A bundled private key is extractable. Acceptance after future iOS updates, reliability across head units and suitability of that identity for general distribution are unresolved. This release invites community testing; it is not a guarantee of universal compatibility.
 
-Earlier releases were tested on the development DiLink5.1 car: live windshield guidance and street names work, Car hotspot now starts CarPlay, and Wi-Fi Direct performance is substantially improved. Occasional audio cutouts remain and are deferred to a later update. The floating-map test build was installed on the development DiLink 5.1 car; feedback led to the pinch corrections in 0.2.9. Earlier wheel-speed and video contributions were tested on a BYD Tang with DiLink 5.0 and an iPhone 15 Pro on iOS 27; wheel-speed dead reckoning in tunnels remains unverified. Broader head-unit and iOS compatibility is not guaranteed. The HUD firmware scope and cleanup limits are documented in [BYD navigation](docs/BYD_NAVIGATION.md).
+The following historical tests concern upstream BYD devices, not validation of this EMPOW R build. Earlier releases were tested on the development DiLink5.1 car: live windshield guidance and street names work, Car hotspot now starts CarPlay, and Wi-Fi Direct performance is substantially improved. Occasional audio cutouts remain and are deferred to a later update. The floating-map test build was installed on the development DiLink 5.1 car; feedback led to the pinch corrections in 0.2.9. Earlier wheel-speed and video contributions were tested on a BYD Tang with DiLink 5.0 and an iPhone 15 Pro on iOS 27; wheel-speed dead reckoning in tunnels remains unverified. Broader head-unit and iOS compatibility is not guaranteed. The HUD firmware scope and cleanup limits are documented in [BYD navigation](docs/BYD_NAVIGATION.md).
 
 ## What’s new in 0.2.14 (historical)
 
@@ -48,7 +66,7 @@ Earlier releases were tested on the development DiLink5.1 car: live windshield g
 
 See [0.2.14 release notes](docs/RELEASE-NOTES-0.2.14.md) and [validation](docs/VALIDATION.md) for contribution links and remaining physical tests. General stutter, calls/Siri, decoder and model-specific reports still need current-device evidence. [0.2.13 notes](docs/RELEASE-NOTES-0.2.13.md) remain available as historical guidance.
 
-If a problem remains, reproduce it on **the current release**, then use **Settings → Diagnostics → Save diagnostic report**. Android 10+ normally saves to **Downloads/DiPlay**; Android 9 uses the document picker. If unavailable, use **View report** or **Share** from the confirmation, which identifies external/private fallback storage. Review the `.txt` and add it to a matching [existing issue](https://github.com/programmerguohuajing/DiPlay-Legacy-Android/issues), or [create one](https://github.com/programmerguohuajing/DiPlay-Legacy-Android/issues/new/choose). Include vehicle/head-unit model, exact firmware and Android/DiLink, phone/iOS, connection backend, relevant settings, steps and failure time. Reports are shared only when you choose; never post your hotspot password.
+If a problem remains, reproduce it on **the current release**, then use **Settings → Diagnostics → Save diagnostic report**. Android 10+ normally saves to **Downloads/DiPlay**; Android 9 uses the document picker. If unavailable, use **View report** or **Share** from the confirmation, which identifies external/private fallback storage. Review the `.txt` and add it to a matching [existing issue](https://github.com/qwe844607333/DiPlay-R/issues), or [create one](https://github.com/qwe844607333/DiPlay-R/issues/new). Include vehicle/head-unit model, exact firmware and Android/DiLink, phone/iOS, connection backend, relevant settings, steps and failure time. Reports are shared only when you choose; never post your hotspot password.
 
 ## Documentation
 
@@ -75,7 +93,7 @@ This repository starts with a clean public source snapshot. Local research, test
 
 ## Community & Feedback
 
-- **Issues & Discussions**: Feel free to discuss questions and issues in [GitHub Issues](https://github.com/programmerguohuajing/DiPlay-Legacy-Android/issues). We will reply whenever time permits.
+- **Issues & Discussions**: Feel free to discuss questions and issues in [GitHub Issues](https://github.com/qwe844607333/DiPlay-R/issues). We will reply whenever time permits.
 - **Check Real Android OS Version**: If installation fails (e.g. "There was a problem parsing the package"), your aftermarket head unit may have a spoofed system version (such as fake Android 10/11/12 on top of real Android 4.4/5.1). You can use this head unit inspection tool provided by [@493330227-wq](https://github.com/493330227-wq) to check your genuine Android version and API level:  
   👉 **[headunit-version-inspector](https://github.com/493330227-wq/headunit-version-inspector)**
 - **Attach Diagnostic Logs**: When reporting a specific problem, attaching detailed diagnostic logs (via **Settings → Diagnostics → Save diagnostic report**, automatically exported to USB/SD cards since v0.2.27) and environment details (head-unit model, Android version, iPhone/iOS version) is strongly recommended.

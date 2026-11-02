@@ -1,5 +1,18 @@
-# DiPlay Legacy Android (中文版)
+# DiPlay-R｜影豹R MSM8996 专项优化版
 
-请查阅完整的中文版说明文档：[README.zh-CN.md](README.zh-CN.md)
+本个人维护分支以 **广汽传祺影豹R／高通 Qualcomm MSM8996／Android 8.1（API 27）／arm64-v8a／1920×720** 为主要调优配置，根据车机现场日志优化无线 CarPlay 的视频积压与连接恢复，目标为动态场景稳定接近 60 FPS。
 
-[English Version / 英文版](README.md)
+## 当前版本：0.3.13（versionCode 133）
+
+- 软积压时继续有效参考链，优先利用队列中已有的新关键帧恢复。
+- 已解码的过时画面仅在有更新画面替代时跳过，保留最后一张画面。
+- 短暂 Wi-Fi 变化核验 1.5 秒，恢复则保留会话，持续失效再重连。
+- 关键帧扫描减少数据复制，细分队列、解码、触控和 CPU／GC 诊断。
+- 默认车机按钮改为 **“影豹R”及高清重绘的红色 R 图标**。
+- 新安装默认请求 60 FPS；升级保留原设置，原来为 30 的需改为 60 并重连。
+
+起始配置：**H.264／60 FPS／80% 分辨率／硬件图层开启**，关闭“流畅视频”和“按帧率请求解码性能”。0.3.13 交付时 2398 项测试执行通过、6 项按原有条件跳过；实车稳定 60 FPS 与断连恢复尚未验收。
+
+请查阅[完整简体中文说明](README.zh-CN.md)、[0.3.13 更新说明](docs/RELEASE-NOTES-0.3.13-PERSONAL.md)及[个人签名与覆盖升级说明](docs/PERSONAL-MAINTENANCE.md)。
+
+[English / 英文说明](README.md) · [个人主仓库](https://github.com/qwe844607333/DiPlay-R)
