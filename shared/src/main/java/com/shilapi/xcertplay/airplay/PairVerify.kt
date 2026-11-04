@@ -17,29 +17,34 @@ class PairVerify(
     private var sharedSecret: ByteArray? = null
     private var encryptionKey: ByteArray? = null
     private var keys: ControlKeys? = null
-    private var verified = false
+    @Volatile private var verified = false
     private var controllerId: String? = null
 
     val isVerified: Boolean get() = verified
-    val verifiedControllerId: String? get() = controllerId
-    val controlKeys: ControlKeys? get() = keys
-    val shared: ByteArray? get() = sharedSecret
+    val verifiedControllerId: String? get() = if (verified) controllerId else null
+    val controlKeys: ControlKeys? get() = if (verified) keys else null
+    val shared: ByteArray? get() = if (verified) sharedSecret?.copyOf() else null
 
     fun handle(body: ByteArray): ByteArray {
-        val tlv = Tlv8Codec.decode(body)
-        val state = tlv[TYPE_STATE]?.firstOrNull()?.toInt()?.and(0xff)
+        // An established control/event/media connection owns these keys until it closes.
+        // A reconnect gets a fresh verifier; never replace live keys with a new provisional M1.
+        if (verified) return errorResponse(4)
+        var state = 0
         return try {
+            val tlv = Tlv8Codec.decode(body)
+            state = tlv[TYPE_STATE]?.firstOrNull()?.toInt()?.and(0xff) ?: 0
             when (state) {
                 1 -> m2(tlv)
                 3 -> m4(tlv)
-                else -> err(state ?: 0)
+                else -> err(state)
             }
         } catch (_: Exception) {
-            err(state ?: 0)
+            err(state)
         }
     }
 
     private fun m2(tlv: Map<Int, ByteArray>): ByteArray {
+        clearPending()
         val clientEphemeralPublicKey = tlv[TYPE_PUBLIC_KEY] ?: return err(2)
         val pair = AirPlayCrypto.x25519Generate()
         ephemeralPublicKey = pair.publicKey
@@ -96,12 +101,26 @@ class PairVerify(
         val readKey = AirPlayCrypto.hkdfSha512(shared, CONTROL_SALT.asciiBytes(), CONTROL_WRITE_KEY_INFO.asciiBytes())
         val writeKey = AirPlayCrypto.hkdfSha512(shared, CONTROL_SALT.asciiBytes(), CONTROL_READ_KEY_INFO.asciiBytes())
         keys = ControlKeys(readKey, writeKey)
-        verified = true
         this.controllerId = controllerId.toString(Charsets.UTF_8)
+        verified = true
         return Tlv8Codec.encode(listOf(Tlv8Item(TYPE_STATE, byteArrayOf(4))))
     }
 
-    private fun err(state: Int): ByteArray = Tlv8Codec.encode(
+    private fun clearPending() {
+        ephemeralPublicKey = null
+        clientEphemeralPublicKey = null
+        sharedSecret = null
+        encryptionKey = null
+        keys = null
+        controllerId = null
+    }
+
+    private fun err(state: Int): ByteArray {
+        clearPending()
+        return errorResponse(state)
+    }
+
+    private fun errorResponse(state: Int): ByteArray = Tlv8Codec.encode(
         listOf(
             Tlv8Item(TYPE_STATE, byteArrayOf(state.toByte())),
             Tlv8Item(TYPE_ERROR, byteArrayOf(ERROR_AUTHENTICATION.toByte())),

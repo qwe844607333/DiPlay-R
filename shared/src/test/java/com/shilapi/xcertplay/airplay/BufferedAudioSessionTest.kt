@@ -286,16 +286,19 @@ class BufferedAudioSessionTest {
         AirPlaySession::class.java.getDeclaredMethod("handle", RtspMessage.Request::class.java).apply { isAccessible = true }
             .invoke(session, RtspMessage.Request(method, "rtsp://test", "RTSP/1.0", emptyMap(), body)) as RtspMessage.Response
 
-    private fun session(disabled: Boolean = false, media: AirPlayMediaHandler): AirPlaySession = AirPlaySession(
-        socket = object : Socket() {
-            override fun getRemoteSocketAddress(): SocketAddress = InetSocketAddress(InetAddress.getLoopbackAddress(), 1234)
-        },
-        config = AirPlayConfig(
-            deviceName = "test", deviceId = "02:00:00:00:00:02", btMac = "02:00:00:00:00:01", sourceVersion = "1.0",
-            main = AirPlayDisplayConfig(widthPixels = 800, heightPixels = 480),
-            mainBufferedAudio = true, disableAudioOutput = disabled,
-        ),
-        identity = AirPlayIdentity.generate(), pairings = PairingStore(), mfi = null,
-        listener = object : AirPlaySessionListener {}, media = media,
-    )
+    private fun session(disabled: Boolean = false, media: AirPlayMediaHandler): AirPlaySession {
+        val client = PairVerifyTestClient()
+        return AirPlaySession(
+            socket = object : Socket() {
+                override fun getRemoteSocketAddress(): SocketAddress = InetSocketAddress(InetAddress.getLoopbackAddress(), 1234)
+            },
+            config = AirPlayConfig(
+                deviceName = "test", deviceId = "02:00:00:00:00:02", btMac = "02:00:00:00:00:01", sourceVersion = "1.0",
+                main = AirPlayDisplayConfig(widthPixels = 800, heightPixels = 480),
+                mainBufferedAudio = true, disableAudioOutput = disabled,
+            ),
+            identity = AirPlayIdentity.generate(), pairings = client.pairings, mfi = null,
+            listener = object : AirPlaySessionListener {}, media = media,
+        ).also { client.authenticate(it.pairVerify) }
+    }
 }

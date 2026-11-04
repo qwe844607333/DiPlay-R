@@ -17,6 +17,7 @@ class AirPlayModesChangedTest {
         var observedAppStates: List<Map<String, Any?>>? = null
         var observedResources: List<Map<String, Any?>>? = null
 
+        val client = PairVerifyTestClient()
         val session = AirPlaySession(
             socket = Socket(),
             config = AirPlayConfig(
@@ -27,7 +28,7 @@ class AirPlayModesChangedTest {
                 main = AirPlayDisplayConfig(widthPixels = 800, heightPixels = 480),
             ),
             identity = AirPlayIdentity.generate(),
-            pairings = PairingStore(),
+            pairings = client.pairings,
             mfi = null,
             listener = object : AirPlaySessionListener {
                 override fun onModesChanged(
@@ -41,6 +42,7 @@ class AirPlayModesChangedTest {
             },
             media = object : AirPlayMediaHandler {},
         )
+        client.authenticate(session.pairVerify)
 
         try {
             val reqBody = BplistCodec.encode(
@@ -87,6 +89,7 @@ class AirPlayModesChangedTest {
         var observedAppStates: List<Map<String, Any?>>? = null
         var observedResources: List<Map<String, Any?>>? = null
 
+        val client = PairVerifyTestClient()
         val session = AirPlaySession(
             socket = Socket(),
             config = AirPlayConfig(
@@ -97,7 +100,7 @@ class AirPlayModesChangedTest {
                 main = AirPlayDisplayConfig(widthPixels = 800, heightPixels = 480),
             ),
             identity = AirPlayIdentity.generate(),
-            pairings = PairingStore(),
+            pairings = client.pairings,
             mfi = null,
             listener = object : AirPlaySessionListener {
                 override fun onModesChanged(
@@ -111,6 +114,7 @@ class AirPlayModesChangedTest {
             },
             media = object : AirPlayMediaHandler {},
         )
+        client.authenticate(session.pairVerify)
 
         try {
             val commandBody = BplistCodec.encode(

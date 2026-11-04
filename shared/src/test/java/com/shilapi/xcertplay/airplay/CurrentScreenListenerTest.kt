@@ -108,7 +108,6 @@ class CurrentScreenListenerTest {
         val engine = CarPlayMediaEngine(sink)
         val session = testSession()
         try {
-            withSharedSecret(session)
             val streams = streamsOf(engine)
             val mainKey = CarPlayMediaEngine.StreamKey(session, 110)
 
@@ -141,13 +140,6 @@ class CurrentScreenListenerTest {
         }
     }
 
-    private fun withSharedSecret(session: AirPlaySession) {
-        // onScreen derives the stream key from the pair-verify secret; any 32 bytes will do for routing.
-        PairVerify::class.java.getDeclaredField("sharedSecret").apply { isAccessible = true }
-            .set(session.pairVerify, ByteArray(32) { it.toByte() })
-        assertTrue(session.sharedSecret != null)
-    }
-
     @Suppress("UNCHECKED_CAST")
     private fun streamsOf(engine: CarPlayMediaEngine): Map<CarPlayMediaEngine.StreamKey, Closeable> =
         CarPlayMediaEngine::class.java.getDeclaredField("streams").apply { isAccessible = true }
@@ -157,19 +149,22 @@ class CurrentScreenListenerTest {
         ScreenStream::class.java.getDeclaredField("listener").apply { isAccessible = true }
             .get(screen) as ScreenStream.Listener
 
-    private fun testSession(): AirPlaySession = AirPlaySession(
-        socket = Socket(),
-        config = AirPlayConfig(
-            deviceName = "test",
-            deviceId = "02:00:00:00:00:02",
-            btMac = "02:00:00:00:00:01",
-            sourceVersion = "1.0",
-            main = AirPlayDisplayConfig(widthPixels = 800, heightPixels = 480),
-        ),
-        identity = AirPlayIdentity.generate(),
-        pairings = PairingStore(),
-        mfi = null,
-        listener = object : AirPlaySessionListener {},
-        media = object : AirPlayMediaHandler {},
-    )
+    private fun testSession(): AirPlaySession {
+        val client = PairVerifyTestClient()
+        return AirPlaySession(
+            socket = Socket(),
+            config = AirPlayConfig(
+                deviceName = "test",
+                deviceId = "02:00:00:00:00:02",
+                btMac = "02:00:00:00:00:01",
+                sourceVersion = "1.0",
+                main = AirPlayDisplayConfig(widthPixels = 800, heightPixels = 480),
+            ),
+            identity = AirPlayIdentity.generate(),
+            pairings = client.pairings,
+            mfi = null,
+            listener = object : AirPlaySessionListener {},
+            media = object : AirPlayMediaHandler {},
+        ).also { client.authenticate(it.pairVerify) }
+    }
 }

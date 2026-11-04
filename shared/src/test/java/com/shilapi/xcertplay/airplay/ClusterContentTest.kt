@@ -13,17 +13,20 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29], manifest = Config.NONE)
 class ClusterContentTest {
-    private fun session(initialUrl: String, onTeardown: (AirPlaySession) -> Unit = {}): AirPlaySession = AirPlaySession(
-        socket = Socket(),
-        config = AirPlayConfig(deviceName = "test", deviceId = "02:00:00:00:00:02", btMac = "02:00:00:00:00:01",
-            sourceVersion = "1", main = AirPlayDisplayConfig(widthPixels = 800, heightPixels = 480),
-            cluster = AirPlayDisplayConfig(widthPixels = 1600, heightPixels = 600, initialUrl = initialUrl)),
-        identity = AirPlayIdentity.generate(), pairings = PairingStore(), mfi = null,
-        listener = object : AirPlaySessionListener {}, media = object : AirPlayMediaHandler {
-            override fun onScreen(session: AirPlaySession, type: Int, stream: Map<String, Any?>): Int = 1
-            override fun onTeardown(session: AirPlaySession, type: Int) { onTeardown(session) }
-        },
-    )
+    private fun session(initialUrl: String, onTeardown: (AirPlaySession) -> Unit = {}): AirPlaySession {
+        val client = PairVerifyTestClient()
+        return AirPlaySession(
+            socket = Socket(),
+            config = AirPlayConfig(deviceName = "test", deviceId = "02:00:00:00:00:02", btMac = "02:00:00:00:00:01",
+                sourceVersion = "1", main = AirPlayDisplayConfig(widthPixels = 800, heightPixels = 480),
+                cluster = AirPlayDisplayConfig(widthPixels = 1600, heightPixels = 600, initialUrl = initialUrl)),
+            identity = AirPlayIdentity.generate(), pairings = client.pairings, mfi = null,
+            listener = object : AirPlaySessionListener {}, media = object : AirPlayMediaHandler {
+                override fun onScreen(session: AirPlaySession, type: Int, stream: Map<String, Any?>): Int = 1
+                override fun onTeardown(session: AirPlaySession, type: Int) { onTeardown(session) }
+            },
+        ).also { client.authenticate(it.pairVerify) }
+    }
 
     private fun setup(session: AirPlaySession) {
         session.javaClass.getDeclaredMethod("handleStreams", List::class.java).apply { isAccessible = true }

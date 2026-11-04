@@ -32,14 +32,18 @@ class DashboardContentDeliveryTest {
             config, AirPlayIdentity(ByteArray(32), ByteArray(32), "test"), PairingStore(),
             object : AirPlaySessionListener {}, object : AirPlayMediaHandler {}, {})
         private val phones = mutableListOf<AirPlaySession>()
-        fun phone(setup: Boolean = true): AirPlaySession = AirPlaySession(Socket(), config,
-            AirPlayIdentity(ByteArray(32), ByteArray(32), "test"), PairingStore(), null,
-            object : AirPlaySessionListener {}, object : AirPlayMediaHandler {
-                override fun onScreen(session: AirPlaySession, type: Int, stream: Map<String, Any?>) = 1
-            }).also {
-                phones += it
-                if (setup) setup(it)
-            }
+        fun phone(setup: Boolean = true): AirPlaySession {
+            val pairings = PairingStore()
+            return AirPlaySession(Socket(), config,
+                AirPlayIdentity.generate(), pairings, null,
+                object : AirPlaySessionListener {}, object : AirPlayMediaHandler {
+                    override fun onScreen(session: AirPlaySession, type: Int, stream: Map<String, Any?>) = 1
+                }).also {
+                    authenticate(it, pairings)
+                    phones += it
+                    if (setup) setup(it)
+                }
+        }
         fun activate(phone: AirPlaySession) = set(controller, "activeSession", phone)
         fun record(phone: AirPlaySession) {
             val listener = controller.javaClass.getDeclaredField("sessionListener").apply { isAccessible = true }
@@ -354,6 +358,32 @@ class DashboardContentDeliveryTest {
     }
 
     companion object {
+        // This module's UI fixture completes the real controller proof instead of setting auth flags.
+        private fun authenticate(phone: AirPlaySession, pairings: PairingStore) {
+            val controller = AirPlayIdentity.generate()
+            pairings.save(controller.pairingId, controller.publicKey)
+            val verify = phone.javaClass.getDeclaredField("pairVerify").apply { isAccessible = true }
+                .get(phone) as PairVerify
+            val ephemeral = AirPlayCrypto.x25519Generate()
+            val m1 = Tlv8Codec.encode(listOf(Tlv8Item(6, byteArrayOf(1)), Tlv8Item(3, ephemeral.publicKey)))
+            val m2 = Tlv8Codec.decode(verify.handle(m1))
+            assertNull(m2[7])
+            val serverPublic = checkNotNull(m2[3])
+            val shared = AirPlayCrypto.x25519Shared(ephemeral.privateKey, serverPublic)
+            val key = AirPlayCrypto.hkdfSha512(shared,
+                "Pair-Verify-Encrypt-Salt".toByteArray(Charsets.US_ASCII),
+                "Pair-Verify-Encrypt-Info".toByteArray(Charsets.US_ASCII))
+            val identifier = controller.pairingId.toByteArray(Charsets.US_ASCII)
+            val signature = AirPlayCrypto.ed25519Sign(controller.privateKey,
+                ephemeral.publicKey + identifier + serverPublic)
+            val proof = Tlv8Codec.encode(listOf(Tlv8Item(1, identifier), Tlv8Item(10, signature)))
+            val encrypted = AirPlayCrypto.chachaSeal(key, AirPlayCrypto.nonceLabel("PV-Msg03"), proof)
+            val m4 = Tlv8Codec.decode(verify.handle(Tlv8Codec.encode(
+                listOf(Tlv8Item(6, byteArrayOf(3)), Tlv8Item(5, encrypted)))))
+            assertNull(m4[7])
+            assertTrue(verify.isVerified)
+        }
+
         private fun set(target: Any, name: String, value: Any?) {
             target.javaClass.getDeclaredField(name).apply { isAccessible = true }.set(target, value)
         }

@@ -118,7 +118,8 @@ class AirPlaySession(
     internal val remoteAddress: InetAddress?
         get() = (socket.remoteSocketAddress as? InetSocketAddress)?.address
     val controllerId: String? get() = pairVerify.verifiedControllerId
-    val sharedSecret: ByteArray? get() = pairVerify.shared?.copyOf()
+    private val hasVerifiedController: Boolean get() = !closed.get() && pairVerify.isVerified
+    val sharedSecret: ByteArray? get() = if (hasVerifiedController) pairVerify.shared else null
     val videoInCar: Boolean get() = config.videoInCar
     private val videoPlaybackAvailability = VideoPlaybackAvailability { allowed ->
         sendCommand(
@@ -572,25 +573,27 @@ class AirPlaySession(
 
     private fun handle(request: RtspMessage.Request): RtspMessage.Response {
         when (request.method) {
-            "SETUP" -> return handleSetup(request)
-            "RECORD" -> {
+            "SETUP" -> return withVerifiedController { handleSetup(request) }
+            "RECORD" -> return withVerifiedController {
                 listener.onSessionActive(this)
-                return RtspMessage.Response(status = 200)
+                RtspMessage.Response(status = 200)
             }
-            "TEARDOWN" -> return handleTeardown(request)
+            "TEARDOWN" -> return withVerifiedController { handleTeardown(request) }
         }
 
         if (config.bufferedAudioOutputEnabled && request.method in BUFFERED_AUDIO_METHODS) {
-            val body = if (request.body.isEmpty() && request.method == "GETANCHOR") emptyMap() else {
-                runCatching { asMap(BplistCodec.decode(request.body)) }.getOrNull()
-                    ?: return RtspMessage.Response(status = 400)
+            return withVerifiedController {
+                val body = if (request.body.isEmpty() && request.method == "GETANCHOR") emptyMap() else {
+                    runCatching { asMap(BplistCodec.decode(request.body)) }.getOrNull()
+                        ?: return@withVerifiedController RtspMessage.Response(status = 400)
+                }
+                val response = media.onBufferedAudioControl(this, request.method, body)
+                if (request.method != "GETANCHOR") debugLog("airplay ${request.method} $body -> ${response ?: "ok"}")
+                if (response == null) RtspMessage.Response(status = 200) else RtspMessage.Response(
+                    headers = mapOf("Content-Type" to PLIST_CONTENT_TYPE),
+                    body = BplistCodec.encode(response),
+                )
             }
-            val response = media.onBufferedAudioControl(this, request.method, body)
-            if (request.method != "GETANCHOR") debugLog("airplay ${request.method} $body -> ${response ?: "ok"}")
-            return if (response == null) RtspMessage.Response(status = 200) else RtspMessage.Response(
-                headers = mapOf("Content-Type" to PLIST_CONTENT_TYPE),
-                body = BplistCodec.encode(response),
-            )
         }
 
         val path = request.path.lowercase()
@@ -634,10 +637,11 @@ class AirPlaySession(
                     body = BplistCodec.encode(info),
                 )
             }
-            request.method == "POST" && path.endsWith("/command") -> handleCommand(request)
+            request.method == "POST" && path.endsWith("/command") ->
+                withVerifiedController { handleCommand(request) }
             request.method == "POST" && (path.endsWith("/modeschanged") || path.endsWith("/changemodes")) ->
-                handleModesChanged(request)
-            request.method == "POST" && path.endsWith("/feedback") -> {
+                withVerifiedController { handleModesChanged(request) }
+            request.method == "POST" && path.endsWith("/feedback") -> withVerifiedController {
                 val body = media.onFeedback(this)
                 if (body == null) {
                     RtspMessage.Response(status = 200)
@@ -652,7 +656,12 @@ class AirPlaySession(
         }
     }
 
+    private inline fun withVerifiedController(action: () -> RtspMessage.Response): RtspMessage.Response =
+        if (hasVerifiedController) action()
+        else RtspMessage.Response(status = 401, statusText = "Unauthorized")
+
     private fun notifySetupResponseSent() {
+        if (!hasVerifiedController) return
         try {
             media.onSetupResponseSent(this)
         } catch (error: Exception) {
@@ -949,7 +958,7 @@ class AirPlaySession(
             socket.tcpNoDelay = true
             debugLog("airplay event connection accepted from ${socket.remoteSocketAddress} noDelay=${socket.tcpNoDelay}")
             eventSocket = socket
-            val shared = pairVerify.shared
+            val shared = sharedSecret
             if (shared == null) {
                 Log.e(TAG, "airplay event rejected: pair-verify shared secret unavailable")
                 safeClose(socket)
