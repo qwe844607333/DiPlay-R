@@ -20,6 +20,15 @@ class PersonalCarDefaultsTest {
     @Test fun aFreshPersonalInstallUsesShadowRAndRequestsSixtyFps() {
         assertEquals("影豹R", AirPlayPersistence.loadOemLabel(context))
         assertEquals(60, AirPlayPersistence.loadFps(context))
+        assertTrue(AirPlayPersistence.loadForceSquareCorners(context))
+    }
+
+    @Test fun preservesAnExplicitSquareCornerChoice() {
+        AirPlayPersistence.saveForceSquareCorners(context, false)
+        assertFalse(AirPlayPersistence.loadForceSquareCorners(context))
+
+        AirPlayPersistence.saveForceSquareCorners(context, true)
+        assertTrue(AirPlayPersistence.loadForceSquareCorners(context))
     }
 
     @Test fun upgradesTheOldDefaultOnceAndKeepsLaterExplicitChoices() {

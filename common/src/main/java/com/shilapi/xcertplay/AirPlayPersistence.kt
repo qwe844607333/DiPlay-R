@@ -1176,7 +1176,7 @@ object AirPlayPersistence {
 
     fun loadForceSquareCorners(context: Context): Boolean =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_FORCE_SQUARE_CORNERS, false)
+            .getBoolean(KEY_FORCE_SQUARE_CORNERS, true)
 
     fun saveForceSquareCorners(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
