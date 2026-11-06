@@ -1086,7 +1086,10 @@ private class VideoDecoder(
                 runCatching { android.os.Debug.getRuntimeStat("art.gc.blocking-gc-time")?.toLongOrNull()?.takeIf { it >= 0 } }.getOrNull()
             } else null
         })
-    private val thread = Thread(::run, "carplay-video").apply { isDaemon = true }
+    private val thread = Thread({
+        CpuAffinity.useAllCores()
+        run()
+    }, "carplay-video").apply { isDaemon = true }
 
     fun start() { thread.start() }
 

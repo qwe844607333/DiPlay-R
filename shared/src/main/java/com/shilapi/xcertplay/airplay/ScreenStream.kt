@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay.airplay
 
 import android.util.Log
+import com.shilapi.xcertplay.media.CpuAffinity
 import java.io.Closeable
 import java.io.InputStream
 import java.net.InetAddress
@@ -69,7 +70,10 @@ class ScreenStream(
 
     private fun startDecryptWorker() {
         if (decryptThread != null) return
-        decryptThread = Thread({ decryptLoop() }, "airplay-screen-decrypt").apply {
+        decryptThread = Thread({
+            CpuAffinity.useAllCores()
+            decryptLoop()
+        }, "airplay-screen-decrypt").apply {
             isDaemon = true
             start()
         }
@@ -101,7 +105,10 @@ class ScreenStream(
         startDecryptWorker()
         val bound = AirPlaySocketBinder.server(bindReference, "AirPlay screen")
         server = bound
-        thread = Thread({ accept(bound) }, "airplay-screen").apply { isDaemon = true; start() }
+        thread = Thread({
+            CpuAffinity.useAllCores()
+            accept(bound)
+        }, "airplay-screen").apply { isDaemon = true; start() }
         return bound.localPort
     }
 
@@ -118,6 +125,10 @@ class ScreenStream(
         try {
             val accepted = bound.accept()
             socket = accepted
+            // Keep a full frame burst in the kernel while the decrypt worker drains it.
+            if (accepted.receiveBufferSize < RECEIVE_BUFFER_BYTES) {
+                runCatching { accepted.receiveBufferSize = RECEIVE_BUFFER_BYTES }
+            }
             run(accepted)
         } catch (error: Exception) {
             if (!closed.get()) listener.onClosed(error)
@@ -272,6 +283,7 @@ class ScreenStream(
         const val DECRYPT_QUEUE_CAPACITY = 10
         /** How long the receive loop waits for a decrypt slot before dropping a frame. */
         const val DECRYPT_QUEUE_OFFER_WAIT_MILLIS = 30L
+        const val RECEIVE_BUFFER_BYTES = 4 * 1024 * 1024
     }
 }
 

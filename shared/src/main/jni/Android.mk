@@ -14,6 +14,12 @@ LOCAL_SRC_FILES := linux_i2c_jni.c
 include $(BUILD_SHARED_LIBRARY)
 
 include $(CLEAR_VARS)
+LOCAL_MODULE := xcertplay_cpu
+LOCAL_SRC_FILES := cpu_affinity_jni.c
+LOCAL_CFLAGS := -O2 -Wall -Wextra -Werror
+include $(BUILD_SHARED_LIBRARY)
+
+include $(CLEAR_VARS)
 LOCAL_MODULE := legacy_ncm_claim
 LOCAL_SRC_FILES := legacy_ncm_claim.c
 LOCAL_CFLAGS := -Wall -Wextra -Werror

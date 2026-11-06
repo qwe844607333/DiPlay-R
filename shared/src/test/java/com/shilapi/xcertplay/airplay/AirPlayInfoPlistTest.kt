@@ -22,6 +22,7 @@ class AirPlayInfoPlistTest {
         val display = (info["displays"] as List<*>).single() as Map<*, *>
         val view = (display["viewAreas"] as List<*>).single() as Map<*, *>
         val safe = view["safeArea"] as Map<*, *>
+        assertEquals("test", info["name"])
         assertEquals(0, display["initialViewArea"])
         assertEquals(1280, view["widthPixels"])
         assertEquals(720, view["heightPixels"])
